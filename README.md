@@ -82,23 +82,42 @@ jalankan `vps-manager` sekali.)
 ============================================================
    VPS MANAGER — SSH / VMess / VLESS / Trojan (Xray-core)
 ============================================================
-  Mode   : domain
-  Domain : vpn.domainkamu.com
-  Xray   : ON   |   Akun: 3
+  OS     : Ubuntu 24.04.5 LTS
+  RAM    : 512MB / 2048MB
+  SWAP   : 0MB / 2047MB
+  CITY   : Jakarta
+  ISP    : PT Deneva
+  IP     : 43.156.218.74
+  DOMAIN : vpn.domainkamu.com
+  UPTIME : 3 hours, 56 minutes
 ------------------------------------------------------------
-  1) Install/Update dependensi & Xray
-  2) Buat akun SSH
-  3) Buat akun VMess
-  4) Buat akun VLESS
-  5) Buat akun Trojan
-  6) List semua akun + status expired
-  7) Hapus akun
-  8) Perpanjang masa aktif akun
-  9) Tampilkan link/config + QR code
-  10) Uninstall bersih
-  11) Bot Telegram
-  0) Keluar
+  MONTH  : 1.17 TiB
+  RX     : 610.91 GiB
+  TX     : 582.84 GiB
+  DAY    : 137.00 GiB
+  RX     : 69.76 GiB
+  TX     : 67.24 GiB
+  TRAFFIC: 585.62 kbit/s
+------------------------------------------------------------
+  XRAY: ON | SSH-WS: ON | NGINX: ON | BOT: OFF | GOOD
+------------------------------------------------------------
+  Akun: 3 (aktif: 3, expired: 0) | Hampir expired (<=3 hari): 0
+============================================================
+  01) Install / Update         07) Hapus Akun
+  02) Buat Akun SSH            08) Perpanjang Akun
+  03) Buat Akun VMess          09) Link / QR Code
+  04) Buat Akun VLESS          10) Uninstall Bersih
+  05) Buat Akun Trojan         11) Bot Telegram
+  06) List Semua Akun          00) Keluar
 ```
+
+Tampilan di atas adalah versi baru yang rapi seperti screenshot referensi:
+info server (OS/RAM/SWAP/CITY/ISP/IP/DOMAIN/UPTIME), traffic MONTH/DAY +
+kecepatan saat ini, baris status XRAY/SSH-WS/NGINX/BOT, dan menu 2 kolom.
+
+Kota/ISP diambil sekali dari ipinfo.io lalu disimpan di state (tidak
+menghambat menu berikutnya). Traffic MONTH/DAY dibaca dari `vnstat` bila
+terpasang (`apt install vnstat`); bila belum, tampil total sejak boot.
 
 ## Perintah non-interaktif (otomasi)
 

@@ -65,6 +65,8 @@ readonly C_GREEN='\033[0;32m'
 readonly C_YELLOW='\033[1;33m'
 readonly C_CYAN='\033[0;36m'
 readonly C_MAGENTA='\033[1;35m'
+readonly C_BLUE='\033[0;34m'
+readonly C_BOLD='\033[1m'
 
 # -----------------------------------------------------------------------------
 # Log — selalu ke stdout DAN file log (timestamp Asia/Jakarta)
@@ -1114,6 +1116,7 @@ do_install() {
         # lama diam saja karena IP VPS gagal terdeteksi dari 1 sumber (ipify).
         local vps_ip resolved
         vps_ip=$(detect_public_ip || true)
+        [[ -n "$vps_ip" ]] && jq_state --arg v "$vps_ip" '.install.ip = $v' 2>/dev/null || true
         resolved=$(getent hosts "$domain" | awk '{print $1}' | head -n 1 || true)
         info "Domain ${domain} resolve ke: ${resolved:-TIDAK RESOLVE ke mana pun}"
         info "IP publik VPS ini: ${vps_ip:-TIDAK TERDETEKSI (cek manual: curl -s https://api.ipify.org)}"
@@ -2120,38 +2123,156 @@ submenu_bot() {
 # -----------------------------------------------------------------------------
 # Menu interaktif
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Tampilan menu — gaya kotak info seperti screenshot referensi (banner, info
+# server, traffic, status, menu 2 kolom). Semua nilai best-effort: bila
+# vnstat / ipinfo tidak ada, tampilkan "-" supaya menu tetap jalan.
+# -----------------------------------------------------------------------------
+fmt_bytes() { # $1=byte -> "1.17 TiB" / "610.91 GiB" / "585 B"
+    local b=${1:-0}
+    if (( b >= 1099511627776 )); then awk -v v="$b" 'BEGIN{printf "%.2f TiB", v/1099511627776}';
+    elif (( b >= 1073741824 )); then awk -v v="$b" 'BEGIN{printf "%.2f GiB", v/1073741824}';
+    elif (( b >= 1048576 )); then awk -v v="$b" 'BEGIN{printf "%.2f MiB", v/1048576}';
+    elif (( b >= 1024 )); then awk -v v="$b" 'BEGIN{printf "%.2f KiB", v/1024}';
+    else printf '%s B' "$b"; fi
+}
+
+uptime_str() { # "3 hours, 56 minutes" / "2 days, 1 hours, 5 minutes"
+    local s d h m
+    s=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+    d=$((s/86400)); h=$((s%86400/3600)); m=$((s%3600/60))
+    if (( d > 0 )); then printf '%d days, %d hours, %d minutes' "$d" "$h" "$m";
+    elif (( h > 0 )); then printf '%d hours, %d minutes' "$h" "$m";
+    else printf '%d minutes' "$m"; fi
+}
+
+main_iface() {
+    local i
+    i=$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/ {for(n=1;n<=NF;n++) if ($n=="dev") print $(n+1)}' | head -n 1)
+    [[ -z "$i" ]] && i=$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -n 1)
+    printf '%s' "${i:-eth0}"
+}
+
+cached_public_ip() { # IP publik (cache di state, deteksi sekali bila kosong)
+    local ip
+    ip=$(state_get '.install.ip // ""')
+    if [[ -z "$ip" ]]; then
+        ip=$(detect_public_ip 2>/dev/null || true)
+        [[ -n "$ip" ]] && jq_state --arg v "$ip" '.install.ip = $v' 2>/dev/null || true
+    fi
+    printf '%s' "${ip:-—}"
+}
+
+server_geo() { # cetak "CITY|ISP" (cache di state .server, fetch sekali via ipinfo.io)
+    local city isp js
+    city=$(state_get '.server.city // ""')
+    isp=$(state_get '.server.isp // ""')
+    if [[ -z "$city" || -z "$isp" ]]; then
+        js=$(curl -fsSL --max-time 3 https://ipinfo.io/json 2>/dev/null || true)
+        if [[ -n "$js" ]]; then
+            city=$(printf '%s' "$js" | jq -r '.city // ""' 2>/dev/null)
+            isp=$(printf '%s' "$js" | jq -r '.org // ""' 2>/dev/null)
+            [[ -n "$city" ]] && jq_state --arg c "$city" '.server.city = $c' 2>/dev/null || true
+            [[ -n "$isp" ]] && jq_state --arg i "$isp" '.server.isp = $i' 2>/dev/null || true
+        fi
+    fi
+    printf '%s|%s' "${city:-—}" "${isp:-—}"
+}
+
+traffic_speed() { # kecepatan gabungan down+up selama 1 detik, "585.62 kbit/s"
+    local iface r1 t1 r2 t2
+    iface=$(main_iface)
+    r1=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
+    t1=$(cat "/sys/class/net/$iface/statistics/tx_bytes" 2>/dev/null || echo 0)
+    sleep 1
+    r2=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
+    t2=$(cat "/sys/class/net/$iface/statistics/tx_bytes" 2>/dev/null || echo 0)
+    awk -v r="$((r2-r1))" -v t="$((t2-t1))" 'BEGIN{printf "%.2f kbit/s", (r+t)*8/1000}'
+}
+
+traffic_lines() { # cetak MONTH/RX/TX/DAY/RX/TX/TRAFFIC (vnstat bila ada, else total boot)
+    local iface mrx mtx drx dtx rx tx
+    iface=$(main_iface)
+    if command -v vnstat >/dev/null 2>&1; then
+        mrx=$(vnstat --json m 2>/dev/null | jq -r --arg i "$iface" '.interfaces[] | select(.id==$i) | .traffic.months[-1].rx // 0')
+        mtx=$(vnstat --json m 2>/dev/null | jq -r --arg i "$iface" '.interfaces[] | select(.id==$i) | .traffic.months[-1].tx // 0')
+        drx=$(vnstat --json d 2>/dev/null | jq -r --arg i "$iface" '.interfaces[] | select(.id==$i) | .traffic.days[-1].rx // 0')
+        dtx=$(vnstat --json d 2>/dev/null | jq -r --arg i "$iface" '.interfaces[] | select(.id==$i) | .traffic.days[-1].tx // 0')
+        [[ "$mrx" =~ ^[0-9]+$ ]] || mrx=0
+        [[ "$mtx" =~ ^[0-9]+$ ]] || mtx=0
+        [[ "$drx" =~ ^[0-9]+$ ]] || drx=0
+        [[ "$dtx" =~ ^[0-9]+$ ]] || dtx=0
+        printf '  MONTH  : %s\n' "$(fmt_bytes "$((mrx+mtx))")"
+        printf '  RX     : %s\n' "$(fmt_bytes "$mrx")"
+        printf '  TX     : %s\n' "$(fmt_bytes "$mtx")"
+        printf '  DAY    : %s\n' "$(fmt_bytes "$((drx+dtx))")"
+        printf '  RX     : %s\n' "$(fmt_bytes "$drx")"
+        printf '  TX     : %s\n' "$(fmt_bytes "$dtx")"
+    else
+        rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
+        tx=$(cat "/sys/class/net/$iface/statistics/tx_bytes" 2>/dev/null || echo 0)
+        printf '  TOTAL  : %s (sejak boot)\n' "$(fmt_bytes "$((rx+tx))")"
+        printf '  RX     : %s\n' "$(fmt_bytes "$rx")"
+        printf '  TX     : %s\n' "$(fmt_bytes "$tx")"
+        printf '  DAY    : — (pasang vnstat: apt install vnstat)\n'
+        printf '  RX     : —\n'
+        printf '  TX     : —\n'
+    fi
+    printf '  TRAFFIC: %s\n' "$(traffic_speed)"
+}
+
 show_header() {
-    local mode domain xray_status total
+    local mode domain xray_status total active expired expiring
     mode=$(state_get '.install.mode // ""')
     domain=$(state_get '.install.domain // ""')
     total=$(jq -r '.accounts | length' "$STATE_FILE" 2>/dev/null || echo 0)
-    if systemctl is-active --quiet xray 2>/dev/null; then xray_status="ON"; else xray_status="OFF"; fi
+    active=$(jq -r '[.accounts[] | select(.status=="active")] | length' "$STATE_FILE" 2>/dev/null || echo 0)
+    expired=$(jq -r '[.accounts[] | select(.status=="expired")] | length' "$STATE_FILE" 2>/dev/null || echo 0)
+    expiring=$(jq -r --arg today "$(today_iso)" --arg soon "$(date -d '+3 days' '+%F')" '[.accounts[] | select(.status=="active" and .expiry >= $today and .expiry <= $soon)] | length' "$STATE_FILE" 2>/dev/null || echo 0)
+    if systemctl is-active --quiet xray 2>/dev/null; then xray_status="${C_GREEN}ON${C_RESET}"; else xray_status="${C_RED}OFF${C_RESET}"; fi
+    local nginx_status ws_status bot_stat health
+    if systemctl is-active --quiet nginx 2>/dev/null; then nginx_status="${C_GREEN}ON${C_RESET}"; else nginx_status="${C_RED}OFF${C_RESET}"; fi
+    if systemctl is-active --quiet ws-epro 2>/dev/null; then ws_status="${C_GREEN}ON${C_RESET}"; else ws_status="${C_RED}OFF${C_RESET}"; fi
+    if [[ "$(bot_status)" == "ON" ]]; then bot_stat="${C_GREEN}ON${C_RESET}"; else bot_stat="${C_RED}OFF${C_RESET}"; fi
+    if [[ -z "$mode" ]]; then health="${C_YELLOW}BELUM INSTALL${C_RESET}";
+    elif systemctl is-active --quiet xray 2>/dev/null && systemctl is-active --quiet nginx 2>/dev/null; then health="${C_GREEN}GOOD${C_RESET}";
+    else health="${C_YELLOW}PERIKSA${C_RESET}"; fi
+    local os_name ram_str swap_str up_str ip_pub city isp
+    os_name=$(grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2- | tr -d '"')
+    ram_str=$(free -m 2>/dev/null | awk '/^Mem:/ {printf "%dMB / %dMB", $3, $2}')
+    swap_str=$(free -m 2>/dev/null | awk '/^Swap:/ {printf "%dMB / %dMB", $3, $2}')
+    up_str=$(uptime_str)
+    ip_pub=$(cached_public_ip)
+    IFS='|' read -r city isp <<< "$(server_geo)"
     clear 2>/dev/null || true
-    printf '%b\n' "${C_MAGENTA}============================================================${C_RESET}"
+    printf '%b\n' "${C_BLUE}============================================================${C_RESET}"
     printf '%b\n' "${C_MAGENTA}   VPS MANAGER — SSH / VMess / VLESS / Trojan (Xray-core)   ${C_RESET}"
-    printf '%b\n' "${C_MAGENTA}============================================================${C_RESET}"
-    printf '  Mode   : %s\n' "${mode:-belum install}"
-    printf '  Domain : %s\n' "${domain:-—}"
-    printf '  Xray   : %s   |   Akun: %s   |   Bot: %s\n' "$xray_status" "$total" "$(bot_status)"
-    printf '%b\n' "${C_MAGENTA}------------------------------------------------------------${C_RESET}"
+    printf '%b\n' "${C_BLUE}============================================================${C_RESET}"
+    printf '  OS     : %s\n' "${os_name:-—}"
+    printf '  RAM    : %s\n' "${ram_str:-—}"
+    printf '  SWAP   : %s\n' "${swap_str:-—}"
+    printf '  CITY   : %s\n' "$city"
+    printf '  ISP    : %s\n' "$isp"
+    printf '  IP     : %b%s%b\n' "$C_RED" "$ip_pub" "$C_RESET"
+    printf '  DOMAIN : %s\n' "${domain:-—}"
+    printf '  UPTIME : %s\n' "$up_str"
+    printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
+    traffic_lines
+    printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
+    printf '  XRAY: %b | SSH-WS: %b | NGINX: %b | BOT: %b | %b\n' "$xray_status" "$ws_status" "$nginx_status" "$bot_stat" "$health"
+    printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
+    printf '  Akun: %s (aktif: %s, expired: %s) | Hampir expired (<=3 hari): %s\n' "$total" "$active" "$expired" "$expiring"
+    printf '%b\n' "${C_BLUE}============================================================${C_RESET}"
 }
-
 show_menu() {
-    echo "  1) Install/Update dependensi & Xray"
-    echo "  2) Buat akun SSH"
-    echo "  3) Buat akun VMess"
-    echo "  4) Buat akun VLESS"
-    echo "  5) Buat akun Trojan"
-    echo "  6) List semua akun + status expired"
-    echo "  7) Hapus akun"
-    echo "  8) Perpanjang masa aktif akun"
-    echo "  9) Tampilkan link/config + QR code"
-    echo "  10) Uninstall bersih"
-    echo "  11) Bot Telegram"
-    echo "  0) Keluar"
+    printf '  %b01%b) %-24s %b07%b) %s\n' "$C_CYAN" "$C_RESET" "Install / Update" "$C_CYAN" "$C_RESET" "Hapus Akun"
+    printf '  %b02%b) %-24s %b08%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun SSH" "$C_CYAN" "$C_RESET" "Perpanjang Akun"
+    printf '  %b03%b) %-24s %b09%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VMess" "$C_CYAN" "$C_RESET" "Link / QR Code"
+    printf '  %b04%b) %-24s %b10%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VLESS" "$C_CYAN" "$C_RESET" "Uninstall Bersih"
+    printf '  %b05%b) %-24s %b11%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun Trojan" "$C_CYAN" "$C_RESET" "Bot Telegram"
+    printf '  %b06%b) %-24s %b00%b) %s\n' "$C_CYAN" "$C_RESET" "List Semua Akun" "$C_CYAN" "$C_RESET" "Keluar"
     echo
 }
-
 menu_loop() {
     while true; do
         show_header
