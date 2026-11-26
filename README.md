@@ -96,6 +96,7 @@ jalankan `vps-manager` sekali.)
   8) Perpanjang masa aktif akun
   9) Tampilkan link/config + QR code
   10) Uninstall bersih
+  11) Bot Telegram
   0) Keluar
 ```
 
@@ -115,13 +116,65 @@ bash vps-manager.sh --create trojan --name user1 --days 30
 
 # Lihat / hapus / perpanjang / tampilkan link
 bash vps-manager.sh --list
-bash vps-manager.sh --delete --protocol vmess --name user1
+bash vps-manager.sh --delete --protocol vmess --name user1 [--yes]
 bash vps-manager.sh --renew  --protocol vless --name user1 --days 30
 bash vps-manager.sh --show   --protocol trojan --name user1
 bash vps-manager.sh --check-expired
 bash vps-manager.sh --uninstall
 bash vps-manager.sh --help
+
+# Bot Telegram (tanpa menu, langsung dari terminal)
+bash vps-manager.sh --setup-bot --bot-token 123456:ABC-DEF --admin-chat-id 123456789
 ```
+
+## Bot Telegram (menu 11)
+
+Kelola akun dari Telegram, tanpa buka Termius. Bot hanya menjawab admin
+yang dikonfigurasi, dan semua aksi dijalankan lewat CLI `vps-manager` yang
+sama dengan menu terminal.
+
+**Siapkan dulu (2 menit):**
+
+1. Chat **@BotFather** di Telegram → `/newbot` → ikuti langkahnya → salin
+   token (format `123456:ABC-DEF...`).
+2. Chat **@userinfobot** (atau @getmyid_bot) → salin angka Chat ID kamu.
+
+**Aktifkan:**
+
+```bash
+menu
+# pilih 11) Bot Telegram → 01 Instal / Update Bot → isi token + Chat ID
+```
+
+atau langsung:
+
+```bash
+vps-manager --setup-bot --bot-token 123456:ABC-DEF --admin-chat-id 123456789
+```
+
+Lalu buka Telegram dan kirim `/start` ke bot kamu.
+
+**Yang bisa dilakukan bot:**
+
+| Tombol / perintah | Fungsi |
+|---|---|
+| Buat Akun (`/create`) | Buat SSH/VMess/VLESS/Trojan (tanya protokol → nama → hari) |
+| List Akun (`/list`) | Daftar semua akun + status expired |
+| Link Akun (`/show`) | Tampilkan link/config akun |
+| Hapus Akun (`/delete`) | Hapus akun (minta konfirmasi dulu) |
+| Perpanjang (`/renew`) | Tambah masa aktif akun |
+| Status VPS (`/status`) | Cek Nginx, Xray, dan path WS |
+
+Catatan:
+
+- Password SSH/Trojan yang dibuat dari bot diacak otomatis dan ditampilkan
+  sekali di chat — simpan saat itu juga (tidak disimpan di server).
+- Token dan Chat ID tersimpan di `/etc/vps-manager/bot.conf` (mode 600).
+- Bot jalan sebagai service `vps-bot` (`/opt/vps-bot/bot.py`, Python stdlib
+  saja, long polling — tanpa dependensi tambahan). Cek dengan
+  `systemctl status vps-bot`.
+- Menu 11 juga bisa Restart / Stop / Hapus bot. Uninstall bersih (menu 10)
+  ikut menghapus bot.
 
 ## Contoh output link
 

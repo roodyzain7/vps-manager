@@ -43,6 +43,13 @@ readonly XRAY_BIN="/usr/local/bin/xray"
 readonly NGINX_CONF="/etc/nginx/conf.d/vps-manager.conf"
 readonly CRON_FILE="/etc/cron.d/vps-manager"
 readonly INSTALL_BIN="/usr/local/bin/vps-manager"
+readonly BOT_DIR="/opt/vps-bot"
+readonly BOT_CONF="/etc/vps-manager/bot.conf"
+readonly BOT_UNIT="/etc/systemd/system/vps-bot.service"
+# FORCE=1 bila dipanggil dengan --yes: lewati konfirmasi destruktif (dipakai bot
+# Telegram untuk hapus akun; tanpa ini `vps-manager --delete` menggantung
+# menunggu ketikan YA di terminal yang tidak ada).
+FORCE=0
 
 # Port Xray (localhost, di belakang Nginx pada mode domain)
 readonly PORT_VMESS_WS=10001
@@ -205,6 +212,10 @@ read_validated() {
 # Konfirmasi aksi destruktif: user harus mengetik YA (huruf besar).
 confirm_destructive() {
     local pesan="$1" jawab=""
+    if (( FORCE == 1 )); then
+        log "INFO" "Konfirmasi dilewati (--yes): ${pesan}"
+        return 0
+    fi
     printf '%b\n' "${C_RED}${pesan}${C_RESET}"
     read -r -p "Ketik YA untuk lanjut, selain itu batal: " jawab
     [[ "$jawab" == "YA" ]]
@@ -1198,6 +1209,16 @@ random_password() { # $1=panjang (default 12) — huruf+angka, tanpa karakter an
     openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c "${1:-12}"
 }
 
+gen_uuid() { # UUID v4 — uuidgen bila ada, fallback /proc (selalu ada di Linux)
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuidgen
+    elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        python3 -c "import uuid; print(uuid.uuid4())"
+    fi
+}
+
 ask_days() {
     local d=""
     d=$(read_validated "Masa aktif (hari, 1-365): " valid_days "Hari harus angka 1-365.")
@@ -1233,7 +1254,9 @@ create_ssh() {
     [[ -z "$days" ]] && days=$(ask_days)
     valid_days "$days" || { error "Hari tidak valid: $days"; return 1; }
     if [[ -z "$password" ]]; then
+        if [[ -t 0 ]]; then
         read -r -s -p "Password (kosongkan = acak 12 karakter): " password; echo
+        fi
         [[ -z "$password" ]] && password=$(random_password 12)
     fi
     if ((${#password} < 8)); then error "Password minimal 8 karakter."; return 1; fi
@@ -1265,12 +1288,12 @@ create_vmess() {
     if state_account_exists "vmess" "$name"; then error "Akun VMess ${name} sudah ada."; return 1; fi
     [[ -z "$days" ]] && days=$(ask_days)
     valid_days "$days" || { error "Hari tidak valid: $days"; return 1; }
-    if [[ -z "$limit_ip" ]]; then
+    if [[ -z "$limit_ip" ]] && [[ -t 0 ]]; then
         read -r -p "Limit IP (kosongkan = tanpa batas; dicatat saja, tidak ditegakkan Xray): " limit_ip
         [[ -n "$limit_ip" ]] && ! [[ "$limit_ip" =~ ^[0-9]+$ ]] && { error "Limit IP harus angka."; return 1; }
     fi
     local uuid expiry acc
-    uuid=$(uuidgen)
+    uuid=$(gen_uuid)
     expiry=$(expiry_iso "$days")
     acc=$(jq -n --arg name "$name" --arg uuid "$uuid" --arg exp "$expiry" --arg now "$(today_iso)" \
         --argjson lip "${limit_ip:-null}" \
@@ -1294,16 +1317,18 @@ create_vless() {
     valid_days "$days" || { error "Hari tidak valid: $days"; return 1; }
     if [[ -z "$transport" ]]; then
         if [[ "$mode" == "reality" ]]; then transport="tcp"; else transport="ws"; fi
+        if [[ -t 0 ]]; then
         read -r -p "Transport [ws/tcp] (default: ${transport}): " -r ans || true
+        fi
         [[ -n "${ans:-}" ]] && transport="$ans"
     fi
     [[ "$transport" != "ws" && "$transport" != "tcp" ]] && { error "Transport harus ws atau tcp."; return 1; }
-    if [[ -z "$limit_ip" ]]; then
+    if [[ -z "$limit_ip" ]] && [[ -t 0 ]]; then
         read -r -p "Limit IP (kosongkan = tanpa batas; dicatat saja): " limit_ip
         [[ -n "$limit_ip" ]] && ! [[ "$limit_ip" =~ ^[0-9]+$ ]] && { error "Limit IP harus angka."; return 1; }
     fi
     local uuid expiry acc flow
-    uuid=$(uuidgen)
+    uuid=$(gen_uuid)
     expiry=$(expiry_iso "$days")
     flow=""; [[ "$transport" == "tcp" ]] && flow="xtls-rprx-vision"
     acc=$(jq -n --arg name "$name" --arg uuid "$uuid" --arg exp "$expiry" --arg now "$(today_iso)" \
@@ -1325,7 +1350,9 @@ create_trojan() {
     [[ -z "$days" ]] && days=$(ask_days)
     valid_days "$days" || { error "Hari tidak valid: $days"; return 1; }
     if [[ -z "$password" ]]; then
+        if [[ -t 0 ]]; then
         read -r -s -p "Password Trojan (kosongkan = acak kuat): " password; echo
+        fi
         [[ -z "$password" ]] && password=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
     fi
     if ((${#password} < 8)); then error "Password minimal 8 karakter."; return 1; fi
@@ -1577,6 +1604,7 @@ do_uninstall() {
     echo "  - Config Nginx vps-manager (${NGINX_CONF})"
     echo "  - State akun (${STATE_DIR}) dan cron (${CRON_FILE})"
     echo "  - User SSH yang tercatat di state.json (HANYA itu)"
+    echo "  - Bot Telegram (service vps-bot, ${BOT_DIR}, ${BOT_CONF})"
     echo "Yang TIDAK dihapus: OpenSSH port 22, user root, user sistem (UID<1000)."
     confirm_destructive "Yakin uninstall SEMUA di atas?" || { info "Dibatalkan."; return 0; }
 
@@ -1604,6 +1632,10 @@ do_uninstall() {
     systemctl disable ws-epro 2>/dev/null || true
     rm -f /etc/systemd/system/ws-epro.service
     rm -rf /opt/ws-epro
+    systemctl stop vps-bot 2>/dev/null || true
+    systemctl disable vps-bot 2>/dev/null || true
+    rm -f "$BOT_UNIT" "$BOT_CONF"
+    rm -rf "$BOT_DIR"
     systemctl daemon-reload 2>/dev/null || true
     rm -f "$XRAY_CONFIG" "$NGINX_CONF" "$CRON_FILE" "$INSTALL_BIN" /usr/local/bin/menu
     rm -rf "$STATE_DIR" /var/log/xray
@@ -1616,6 +1648,473 @@ do_uninstall() {
         rm -f "$LOG_FILE"
     fi
     info "Uninstall selesai. Hapus file script ini secara manual bila sudah tidak perlu."
+}
+
+
+# -----------------------------------------------------------------------------
+# Bot Telegram — kelola akun dari Telegram (menu 11).
+# Bot (Python stdlib saja, long polling) hanya menjawab ADMIN_CHAT_ID dan
+# menjalankan CLI `vps-manager` yang sama dengan menu terminal, jadi akun
+# yang dibuat dari Telegram sama persis dengan dari menu.
+# Token didapat dari @BotFather, Chat ID dari @userinfobot / @getmyid_bot.
+# -----------------------------------------------------------------------------
+setup_bot() {
+    # $1=token (opsional) $2=admin chat id (opsional) — bila kosong ditanya.
+    local token="${1:-}" admin_id="${2:-}"
+    if [[ -z "$token" ]]; then
+        echo "Buat bot dulu di Telegram: chat @BotFather -> /newbot -> salin tokennya."
+        echo "Chat ID kamu: chat @userinfobot atau @getmyid_bot di Telegram."
+        read -r -s -p "Token bot Telegram: " token; echo
+    fi
+    if [[ -z "$admin_id" ]]; then
+        read -r -p "Admin Chat ID (angka): " admin_id
+    fi
+    if ! [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]]; then
+        error "Token tidak valid (format: angka:huruf, contoh 123456:ABC-DEF...)."
+        return 1
+    fi
+    if ! [[ "$admin_id" =~ ^[0-9]+$ ]]; then
+        error "Admin Chat ID harus angka."
+        return 1
+    fi
+    mkdir -p "$BOT_DIR" "$STATE_DIR"
+    cat > "${BOT_DIR}/bot.py" <<'PYEOF'
+#!/usr/bin/env python3
+"""Bot Telegram untuk vps-manager.
+
+Kelola akun SSH / VMess / VLESS / Trojan dari Telegram. Bot ini TIDAK
+mendua logika: semua aksi dijalankan lewat CLI `vps-manager` (yang sama
+dengan menu terminal), jadi akun yang dibuat dari Telegram sama persis
+dengan yang dibuat dari menu.
+
+Hanya menjawab ADMIN_CHAT_ID yang dikonfigurasi di bot.conf. Jalankan
+sebagai root (butuh useradd / tulis state / restart Xray).
+
+Perintah:
+  /start, /menu  - tampilkan menu tombol
+  /list          - daftar semua akun + status expired
+  /status        - cek rantai Nginx -> Xray -> path WS
+  /create        - buat akun (tanya protokol, nama, hari)
+  /show          - tampilkan link/config akun
+  /delete        - hapus akun (dengan konfirmasi)
+  /renew         - perpanjang masa aktif akun
+  /cancel        - batalkan percakapan yang sedang berjalan
+"""
+
+import json
+import logging
+import os
+import random
+import re
+import string
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+BOT_CONF = os.environ.get("VPS_BOT_CONF", "/etc/vps-manager/bot.conf")
+VPS_MANAGER = os.environ.get("VPS_MANAGER_BIN", "/usr/local/bin/vps-manager")
+
+PROTOCOLS = ("ssh", "vmess", "vless", "trojan")
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{2,31}$")
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+MAIN_KEYBOARD = {
+    "keyboard": [
+        ["Buat Akun", "List Akun"],
+        ["Link Akun", "Hapus Akun"],
+        ["Perpanjang", "Status VPS"],
+        ["Batal"],
+    ],
+    "resize_keyboard": True,
+}
+PROTO_KEYBOARD = {
+    "keyboard": [["SSH", "VMess"], ["VLESS", "Trojan"], ["Batal"]],
+    "resize_keyboard": True,
+}
+CONFIRM_KEYBOARD = {
+    "keyboard": [["Ya, Hapus", "Batal"]],
+    "resize_keyboard": True,
+}
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+)
+
+
+def load_conf(path=BOT_CONF):
+    """Baca bot.conf (format KEY=VALUE)."""
+    conf = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            conf[key.strip()] = val.strip().strip('"').strip("'")
+    token = conf.get("BOT_TOKEN", "")
+    admin = conf.get("ADMIN_CHAT_ID", "")
+    if not token or not admin.isdigit():
+        raise SystemExit(
+            "bot.conf tidak valid: isi BOT_TOKEN dan ADMIN_CHAT_ID "
+            "(angka). Jalankan menu 11 > Instal Bot di vps-manager."
+        )
+    return token, int(admin)
+
+
+def api(token, method, params=None, timeout=30):
+    """Panggil Bot API Telegram, kembalikan dict hasil (atau None)."""
+    url = "https://api.telegram.org/bot%s/%s" % (token, method)
+    data = json.dumps(params or {}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            body = {}
+        logging.error("Telegram %s gagal HTTP %s: %s", method, e.code, body)
+        return None
+    except Exception as e:
+        logging.error("Telegram %s gagal: %s", method, e)
+        return None
+    if not body.get("ok"):
+        logging.error("Telegram %s: %s", method, body)
+        return None
+    return body.get("result")
+
+
+def send(token, chat_id, text, keyboard=None):
+    """Kirim pesan (potong per 4000 karakter, Telegram maks 4096)."""
+    text = text or "(tidak ada output)"
+    for i in range(0, len(text), 4000):
+        chunk = text[i : i + 4000]
+        params = {"chat_id": chat_id, "text": chunk}
+        if keyboard is not None and i == 0:
+            params["reply_markup"] = keyboard
+        api(token, "sendMessage", params, timeout=15)
+
+
+def strip_ansi(text):
+    return ANSI_RE.sub("", text or "")
+
+
+def run_cli(args, timeout=180):
+    """Jalankan `vps-manager ...`, kembalikan output bersih (tanpa ANSI)."""
+    try:
+        proc = subprocess.run(
+            [VPS_MANAGER] + args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return "Perintah timeout (>%s detik)." % timeout
+    except Exception as e:
+        return "Gagal menjalankan vps-manager: %s" % e
+    out = strip_ansi((proc.stdout or "") + (proc.stderr or "")).strip()
+    return out or "(perintah selesai tanpa output)"
+
+
+def random_password(n=12):
+    alphabet = string.ascii_letters + string.digits
+    return "".join(random.choice(alphabet) for _ in range(n))
+
+
+def cmd_create(session):
+    """Jalankan pembuatan akun dari data percakapan."""
+    proto = session["data"]["proto"]
+    name = session["data"]["name"]
+    days = session["data"]["days"]
+    # Catatan: CLI memakai bentuk `--create <protokol>` (posisi), BUKAN
+    # `--create --protocol <protokol>` — bentuk kedua membuat proto terisi
+    # "--protocol" dan CLI menolaknya.
+    args = ["--create", proto, "--name", name, "--days", days]
+    if proto == "ssh":
+        # CLI meminta password bila kosong — beri acak supaya tidak menggantung.
+        args += ["--password", random_password(12)]
+    return run_cli(args)
+
+
+def cmd_show(session):
+    return run_cli(
+        ["--show", "--protocol", session["data"]["proto"],
+         "--name", session["data"]["name"]]
+    )
+
+
+def cmd_delete(session):
+    return run_cli(
+        ["--delete", "--protocol", session["data"]["proto"],
+         "--name", session["data"]["name"], "--yes"]
+    )
+
+
+def cmd_renew(session):
+    return run_cli(
+        ["--renew", "--protocol", session["data"]["proto"],
+         "--name", session["data"]["name"], "--days", session["data"]["days"]]
+    )
+
+
+# Peta langkah percakapan: (prompt berikutnya, keyboard berikutnya)
+# Tiap langkah menyimpan jawaban ke session["data"][field].
+STEPS = {
+    "create": [
+        ("proto", "Pilih protokol akun yang dibuat:", PROTO_KEYBOARD),
+        ("name", "Nama akun? (huruf kecil, 3-32 karakter, contoh: aku)", None),
+        ("days", "Masa aktif berapa hari? (1-365, ketik 0 untuk 30 hari)", None),
+    ],
+    "show": [
+        ("proto", "Link akun protokol apa?", PROTO_KEYBOARD),
+        ("name", "Nama akunnya?", None),
+    ],
+    "delete": [
+        ("proto", "Hapus akun protokol apa?", PROTO_KEYBOARD),
+        ("name", "Nama akunnya?", None),
+        ("confirm", "Yakin hapus akun ini secara permanen?", CONFIRM_KEYBOARD),
+    ],
+    "renew": [
+        ("proto", "Perpanjang akun protokol apa?", PROTO_KEYBOARD),
+        ("name", "Nama akunnya?", None),
+        ("days", "Tambah berapa hari? (1-365)", None),
+    ],
+}
+
+FINISH = {"create": cmd_create, "show": cmd_show,
+          "delete": cmd_delete, "renew": cmd_renew}
+
+MENU_TEXT = (
+    "VPS MANAGER — Bot Telegram\n"
+    "Kelola akun SSH / VMess / VLESS / Trojan.\n\n"
+    "Buat Akun — buat akun baru\n"
+    "List Akun — daftar semua akun + expired\n"
+    "Link Akun — tampilkan link/config akun\n"
+    "Hapus Akun — hapus akun (konfirmasi dulu)\n"
+    "Perpanjang — tambah masa aktif akun\n"
+    "Status VPS — cek Nginx, Xray, dan path WS"
+)
+
+
+def valid_name(name):
+    return bool(USERNAME_RE.match(name or ""))
+
+
+def valid_days(days):
+    return days.isdigit() and 1 <= int(days) <= 365
+
+
+def handle_message(token, admin_id, sessions, msg):
+    """Tangani satu pesan masuk. Kembalikan None (balasan dikirim langsung)."""
+    chat = msg.get("chat", {})
+    chat_id = chat.get("id")
+    text = (msg.get("text") or "").strip()
+    if chat_id is None or not text:
+        return
+    if chat_id != admin_id:
+        send(token, chat_id, "Bot ini hanya untuk admin VPS.")
+        logging.warning("pesan ditolak dari chat %s", chat_id)
+        return
+
+    session = sessions.get(chat_id)
+
+    # Batal kapan saja.
+    if text in ("/cancel", "Batal"):
+        sessions.pop(chat_id, None)
+        send(token, chat_id, "Dibatalkan.", MAIN_KEYBOARD)
+        return
+
+    # Perintah langsung (tanpa percakapan).
+    if text in ("/start", "/menu"):
+        sessions.pop(chat_id, None)
+        send(token, chat_id, MENU_TEXT, MAIN_KEYBOARD)
+        return
+    if text == "/list":
+        sessions.pop(chat_id, None)
+        send(token, chat_id, run_cli(["--list"]), MAIN_KEYBOARD)
+        return
+    if text == "/status":
+        sessions.pop(chat_id, None)
+        send(token, chat_id, run_cli(["--check"]), MAIN_KEYBOARD)
+        return
+
+    # Tombol menu utama -> mulai percakapan.
+    start = {
+        "Buat Akun": "create", "/create": "create",
+        "Link Akun": "show", "/show": "show",
+        "Hapus Akun": "delete", "/delete": "delete",
+        "Perpanjang": "renew", "/renew": "renew",
+        "List Akun": None, "Status VPS": None,
+    }
+    if text in start and session is None:
+        if text == "List Akun":
+            send(token, chat_id, run_cli(["--list"]), MAIN_KEYBOARD)
+            return
+        if text == "Status VPS":
+            send(token, chat_id, run_cli(["--check"]), MAIN_KEYBOARD)
+            return
+        kind = start[text]
+        sessions[chat_id] = {"kind": kind, "step": 0, "data": {}}
+        field, prompt, kb = STEPS[kind][0]
+        send(token, chat_id, prompt, kb)
+        return
+
+    # Lanjutkan percakapan yang sedang berjalan.
+    if session is not None:
+        kind = session["kind"]
+        steps = STEPS[kind]
+        idx = session["step"]
+        field, _, _ = steps[idx]
+        value = text
+
+        if field == "proto":
+            value = value.lower()
+            if value not in PROTOCOLS:
+                send(token, chat_id,
+                     "Protokol tidak dikenal. Pilih: SSH, VMess, VLESS, Trojan.",
+                     PROTO_KEYBOARD)
+                return
+        elif field == "name":
+            if not valid_name(value):
+                send(token, chat_id,
+                     "Nama tidak valid (huruf kecil, 3-32 karakter, "
+                     "diawali huruf/underscore). Coba lagi.")
+                return
+        elif field == "days":
+            # Telegram tidak bisa kirim pesan kosong — 0 berarti default 30 hari.
+            if value in ("0", "-", "default") and kind == "create":
+                value = "30"
+            if not valid_days(value):
+                send(token, chat_id,
+                     "Hari harus angka 1-365. Coba lagi.")
+                return
+        elif field == "confirm":
+            if value not in ("Ya, Hapus",):
+                sessions.pop(chat_id, None)
+                send(token, chat_id, "Penghapusan dibatalkan.",
+                     MAIN_KEYBOARD)
+                return
+            value = "ya"
+
+        session["data"][field] = value
+        session["step"] = idx + 1
+        if session["step"] < len(steps):
+            _, prompt, kb = steps[session["step"]]
+            send(token, chat_id, prompt, kb)
+            return
+        # Selesai: jalankan aksi.
+        sessions.pop(chat_id, None)
+        result = FINISH[kind](session)
+        send(token, chat_id, result, MAIN_KEYBOARD)
+        return
+
+    # Tidak dikenal -> tampilkan menu.
+    send(token, chat_id, MENU_TEXT, MAIN_KEYBOARD)
+
+
+def main():
+    token, admin_id = load_conf()
+    logging.info("bot jalan (admin chat %s)", admin_id)
+    sessions = {}
+    offset = None
+    while True:
+        params = {"timeout": 30}
+        if offset is not None:
+            params["offset"] = offset
+        updates = api(token, "getUpdates", params, timeout=35)
+        if updates is None:
+            time.sleep(5)
+            continue
+        for upd in updates:
+            offset = upd["update_id"] + 1
+            msg = upd.get("message")
+            if msg:
+                try:
+                    handle_message(token, admin_id, sessions, msg)
+                except Exception:
+                    logging.exception("gagal menangani pesan")
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+    chmod +x "${BOT_DIR}/bot.py"
+    python3 -m py_compile "${BOT_DIR}/bot.py" || { error "bot.py gagal dicek sintaks."; return 1; }
+    printf 'BOT_TOKEN=%s\nADMIN_CHAT_ID=%s\n' "$token" "$admin_id" > "$BOT_CONF"
+    chmod 600 "$BOT_CONF"
+    cat > "$BOT_UNIT" <<'EOF'
+[Unit]
+Description=Bot Telegram vps-manager
+After=network.target xray.service
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/vps-bot/bot.py
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable vps-bot 2>/dev/null || true
+    systemctl restart vps-bot 2>/dev/null || systemctl start vps-bot 2>/dev/null || warn "Bot gagal start — cek: systemctl status vps-bot"
+    sleep 2
+    if systemctl is-active --quiet vps-bot 2>/dev/null; then
+        info "Bot Telegram BERJALAN. Buka Telegram dan kirim /start ke bot kamu."
+    else
+        warn "Bot belum aktif — cek token/Chat ID lalu: systemctl status vps-bot"
+        warn "Pastikan token dari @BotFather benar dan Chat ID angka (cek di @userinfobot)."
+    fi
+    echo "Perintah bot: /start /list /status /create /show /delete /renew /cancel"
+}
+
+bot_status() {
+    if systemctl is-active --quiet vps-bot 2>/dev/null; then echo "ON"; else echo "OFF"; fi
+}
+
+submenu_bot() {
+    while true; do
+        echo "================= BOT TELEGRAM =================="
+        echo "  Status Bot : [$(bot_status)]"
+        echo "  Config     : ${BOT_CONF}  (token + admin chat id)"
+        echo "  Service    : vps-bot.service  |  File: ${BOT_DIR}/bot.py"
+        echo
+        echo "  [01] Instal / Update Bot (isi token + admin chat id)"
+        echo "  [02] Restart Bot"
+        echo "  [03] Stop Bot"
+        echo "  [04] Hapus Bot"
+        echo "  [b]  Back"
+        echo "  [x]  EXIT"
+        echo
+        local pil=""
+        read -r -p "Pilih [1-4/b/x]: " pil
+        case "$pil" in
+            1) setup_bot || warn "Instal bot tidak selesai." ;;
+            2) systemctl restart vps-bot 2>/dev/null && info "Bot di-restart: $(bot_status)" || warn "Restart gagal." ;;
+            3) systemctl stop vps-bot 2>/dev/null && info "Bot di-stop." || warn "Stop gagal." ;;
+            4)
+                if confirm_destructive "HAPUS bot Telegram (service + file + config)?"; then
+                    systemctl stop vps-bot 2>/dev/null || true
+                    systemctl disable vps-bot 2>/dev/null || true
+                    rm -f "$BOT_UNIT" "$BOT_CONF"
+                    rm -rf "$BOT_DIR"
+                    systemctl daemon-reload 2>/dev/null || true
+                    info "Bot dihapus."
+                else
+                    info "Dibatalkan."
+                fi
+                ;;
+            b|B) return 0 ;;
+            x|X) echo "Sampai jumpa!"; exit 0 ;;
+            *) error "Pilihan tidak valid: ${pil}" ;;
+        esac
+        echo
+        read -r -p "Tekan Enter untuk lanjut..." -r _
+    done
 }
 
 # -----------------------------------------------------------------------------
@@ -1633,7 +2132,7 @@ show_header() {
     printf '%b\n' "${C_MAGENTA}============================================================${C_RESET}"
     printf '  Mode   : %s\n' "${mode:-belum install}"
     printf '  Domain : %s\n' "${domain:-—}"
-    printf '  Xray   : %s   |   Akun: %s\n' "$xray_status" "$total"
+    printf '  Xray   : %s   |   Akun: %s   |   Bot: %s\n' "$xray_status" "$total" "$(bot_status)"
     printf '%b\n' "${C_MAGENTA}------------------------------------------------------------${C_RESET}"
 }
 
@@ -1648,6 +2147,7 @@ show_menu() {
     echo "  8) Perpanjang masa aktif akun"
     echo "  9) Tampilkan link/config + QR code"
     echo "  10) Uninstall bersih"
+    echo "  11) Bot Telegram"
     echo "  0) Keluar"
     echo
 }
@@ -1657,7 +2157,7 @@ menu_loop() {
         show_header
         show_menu
         local pilih=""
-        read -r -p "Pilih menu [0-10]: " pilih
+        read -r -p "Pilih menu [0-11]: " pilih
         # PENTING: setiap aksi dibungkus "|| warn" supaya kegagalan (mis. install
         # batal karena port dipakai) kembali ke menu, BUKAN keluar script.
         # Sebelum perbaikan ini, "return 1" dari do_install + set -e membuat
@@ -1673,6 +2173,7 @@ menu_loop() {
             8)  renew_account || warn "Perpanjang tidak selesai — kembali ke menu." ;;
             9)  show_link || warn "Tampilkan link gagal — kembali ke menu." ;;
             10) do_uninstall || warn "Uninstall tidak selesai — kembali ke menu." ;;
+            11) submenu_bot || warn "Menu bot tidak selesai — kembali ke menu." ;;
             0)  echo "Sampai jumpa!"; exit 0 ;;
             *)  error "Pilihan tidak valid: ${pilih}" ;;
         esac
@@ -1806,6 +2307,7 @@ PENGGUNAAN:
 
   bash vps-manager.sh --install --mode domain --domain contoh.com --email admin@contoh.com
   bash vps-manager.sh --install --mode reality
+  bash vps-manager.sh --setup-bot --bot-token 123456:ABC-DEF --admin-chat-id 123456789
 
   bash vps-manager.sh --create ssh    --name user1 --days 30 [--password rahasia]
   bash vps-manager.sh --create vmess  --name user1 --days 30 [--limit-ip 2]
@@ -1813,7 +2315,7 @@ PENGGUNAAN:
   bash vps-manager.sh --create trojan --name user1 --days 30 [--password rahasia]
 
   bash vps-manager.sh --list
-  bash vps-manager.sh --delete --protocol vmess --name user1
+  bash vps-manager.sh --delete --protocol vmess --name user1 [--yes]
   bash vps-manager.sh --renew  --protocol vmess --name user1 --days 30
   bash vps-manager.sh --show   --protocol vless --name user1
   bash vps-manager.sh --check          Cek rantai koneksi Nginx -> Xray -> path WS
@@ -1844,7 +2346,7 @@ main() {
         return 0
     fi
 
-    local cmd="" mode="" domain="" email="" proto="" name="" days="" password="" transport="" limit_ip=""
+    local cmd="" mode="" domain="" email="" proto="" name="" days="" password="" transport="" limit_ip="" bot_token="" admin_chat_id=""
     while (( $# > 0 )); do
         case "$1" in
             --help|-h) print_help; exit 0 ;;
@@ -1856,6 +2358,10 @@ main() {
             --show) cmd="show"; shift ;;
             --check-expired) cmd="check-expired"; shift ;;
             --check) cmd="check"; shift ;;
+            --setup-bot) cmd="setup-bot"; shift ;;
+            --bot-token) bot_token="${2:-}"; shift 2 ;;
+            --admin-chat-id) admin_chat_id="${2:-}"; shift 2 ;;
+            --yes) FORCE=1; shift ;;
             --uninstall) cmd="uninstall"; shift ;;
             --mode) mode="${2:-}"; shift 2 ;;
             --domain) domain="${2:-}"; shift 2 ;;
@@ -1892,6 +2398,7 @@ main() {
         show) show_link "$proto" "$name" ;;
         check-expired) check_expired ;;
         check) do_check ;;
+        setup-bot) setup_bot "$bot_token" "$admin_chat_id" ;;
         uninstall) do_uninstall ;;
         *) error "Tidak ada perintah. Jalankan: bash vps-manager.sh --help"; exit 1 ;;
     esac
