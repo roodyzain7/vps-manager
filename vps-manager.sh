@@ -67,6 +67,7 @@ readonly C_CYAN='\033[0;36m'
 readonly C_MAGENTA='\033[1;35m'
 readonly C_BLUE='\033[0;34m'
 readonly C_BOLD='\033[1m'
+readonly C_BG_BLUE='\033[44m'
 
 # -----------------------------------------------------------------------------
 # Log — selalu ke stdout DAN file log (timestamp Asia/Jakarta)
@@ -2221,6 +2222,588 @@ traffic_lines() { # cetak MONTH/RX/TX/DAY/RX/TX/TRAFFIC (vnstat bila ada, else t
     printf '  TRAFFIC: %s\n' "$(traffic_speed)"
 }
 
+# -----------------------------------------------------------------------------
+# FEATURES (menu 12) — submenu seperti screenshot referensi: Running Service,
+# Restart, Auto Reboot, Monitoring, SpeedTest, Delete Expired, MENU FIXX
+# (Banner/Domain/DNS/Haproxy/Nginx/WS ePRO/Domain/Xray), MENU CLEAR,
+# INFORMATION, OTHER (Anti-DDoS, Script Lain, Limit Speed, XRAY On/Off,
+# Boster CPU). Semua aksi best-effort dan jujur: layanan yang memang tidak
+# terpasang di script ini (mis. HAProxy) dilaporkan, bukan dipalsukan.
+# -----------------------------------------------------------------------------
+feat_pause() { read -r -p "Tekan Enter untuk kembali ke menu Features..." -r _; }
+
+feat_running_service() {
+    echo "=== Running Service ==="
+    local svc
+    for svc in ssh xray nginx ws-epro vps-bot; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            printf '  %-10s : %bON%b\n' "$svc" "$C_GREEN" "$C_RESET"
+        else
+            printf '  %-10s : %bOFF%b\n' "$svc" "$C_RED" "$C_RESET"
+        fi
+    done
+    echo
+    echo "--- Port yang LISTEN ---"
+    ss -tlnp 2>/dev/null | awk 'NR>1 {print "  "$1" "$4" "$NF}' | sort -u
+    echo
+    if systemctl is-active --quiet xray 2>/dev/null && systemctl is-active --quiet nginx 2>/dev/null; then
+        info "SIAP DIGUNAKAN — Xray + Nginx jalan."
+    else
+        warn "Ada layanan mati — pakai 2.) Restart Service atau 13.)/14.) Fixx."
+    fi
+}
+
+feat_restart_service() {
+    echo "=== Restart Service ==="
+    systemctl restart xray 2>/dev/null || warn "restart xray gagal"
+    systemctl restart nginx 2>/dev/null || warn "restart nginx gagal"
+    systemctl restart ws-epro 2>/dev/null || warn "restart ws-epro gagal"
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+    sleep 2
+    feat_running_service
+}
+
+feat_auto_reboot() {
+    echo "=== Auto Reboot ==="
+    local cur
+    cur=$(crontab -l 2>/dev/null | grep -F "/sbin/reboot" | head -n 1 || true)
+    echo "Cron reboot saat ini: ${cur:-tidak ada}"
+    echo "  1) Atur reboot harian (pilih jam)"
+    echo "  2) Hapus auto reboot"
+    echo "  0) Batal"
+    local p jam menit
+    read -r -p "Pilih [0-2]: " p
+    case "$p" in
+        1)
+            read -r -p "Jam reboot (0-23): " jam
+            read -r -p "Menit (0-59, kosong=0): " menit
+            [[ -z "$menit" ]] && menit=0
+            if [[ "$jam" =~ ^[0-9]+$ ]] && (( jam >= 0 && jam <= 23 )) && [[ "$menit" =~ ^[0-9]+$ ]] && (( menit >= 0 && menit <= 59 )); then
+                (crontab -l 2>/dev/null | grep -vF "/sbin/reboot"; echo "$menit $jam * * * /sbin/reboot # auto-reboot-vps-manager") | crontab -
+                info "Auto reboot diatur tiap hari jam $jam:$menit."
+            else
+                error "Jam/menit tidak valid."
+            fi
+            ;;
+        2)
+            (crontab -l 2>/dev/null | grep -vF "/sbin/reboot") | crontab -
+            info "Auto reboot dihapus."
+            ;;
+        *) info "Dibatalkan." ;;
+    esac
+}
+
+feat_monitoring() {
+    echo "=== Monitoring ==="
+    echo "--- Uptime & Load ---"
+    uptime
+    echo "--- RAM ---"
+    free -h
+    echo "--- Disk ---"
+    df -h / /root 2>/dev/null
+    echo "--- Traffic ---"
+    traffic_lines
+    echo "--- 10 proses CPU teratas ---"
+    ps -eo pid,ppid,%cpu,%mem,comm --sort=-%cpu 2>/dev/null | head -n 12
+}
+
+feat_speedtest() {
+    echo "=== SpeedTest ==="
+    if command -v speedtest-cli >/dev/null 2>&1; then
+        speedtest-cli --simple 2>&1 || warn "speedtest-cli gagal."
+    else
+        info "speedtest-cli belum ada — tes unduh 10 MB dari Cloudflare:"
+        local t0 t1 dt
+        t0=$(date +%s%N)
+        if curl -fsSL -o /dev/null --max-time 30 https://speed.cloudflare.com/__down?bytes=10000000 2>/dev/null; then
+            t1=$(date +%s%N)
+            dt=$(( (t1 - t0) / 1000000 ))
+            awk -v ms="$dt" 'BEGIN{printf "  10 MB dalam %.2f detik = %.2f Mbit/s\n", ms/1000, 80/(ms/1000)}'
+        else
+            error "Tes unduh gagal (cek internet VPS)."
+        fi
+    fi
+}
+
+feat_delete_expired() {
+    echo "=== Delete All Account Exp ==="
+    check_expired
+    list_accounts
+}
+
+feat_change_banner() {
+    echo "=== Change Banner ==="
+    echo "Banner sekarang (bila ada):"
+    cat /etc/ssh/banner.txt 2>/dev/null || echo "  (belum ada)"
+    echo "Ketik teks banner baru (kosongkan = hapus banner), lalu Enter:"
+    local teks
+    read -r -p "Banner: " teks
+    if [[ -z "$teks" ]]; then
+        rm -f /etc/ssh/banner.txt
+        sed -i '/^Banner /d' /etc/ssh/sshd_config 2>/dev/null || true
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        info "Banner dihapus."
+        return 0
+    fi
+    printf '%s\n' "$teks" > /etc/ssh/banner.txt
+    if grep -q '^Banner ' /etc/ssh/sshd_config 2>/dev/null; then
+        sed -i 's|^Banner .*|Banner /etc/ssh/banner.txt|' /etc/ssh/sshd_config
+    elif grep -q '^#Banner ' /etc/ssh/sshd_config 2>/dev/null; then
+        sed -i 's|^#Banner .*|Banner /etc/ssh/banner.txt|' /etc/ssh/sshd_config
+    else
+        echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
+    fi
+    if sshd -t 2>/dev/null; then
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        info "Banner diganti."
+    else
+        error "sshd -t gagal — banner tidak diterapkan."
+    fi
+}
+
+feat_change_domain() {
+    echo "=== Change Domain ==="
+    local cur_domain email new_domain resolved vps_ip
+    cur_domain=$(state_get '.install.domain // ""')
+    email=$(state_get '.install.email // ""')
+    echo "Domain sekarang: ${cur_domain:-—}"
+    read -r -p "Domain baru: " new_domain
+    [[ -z "$new_domain" ]] && { error "Domain kosong."; return 1; }
+    [[ "$new_domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { error "Format domain tidak valid."; return 1; }
+    vps_ip=$(detect_public_ip || true)
+    resolved=$(getent hosts "$new_domain" | awk '{print $1}' | head -n 1 || true)
+    info "Domain $new_domain resolve ke: ${resolved:-TIDAK RESOLVE}"
+    info "IP publik VPS: ${vps_ip:-tidak terdeteksi}"
+    if [[ -n "$resolved" && -n "$vps_ip" && "$resolved" != "$vps_ip" ]]; then
+        warn "A record belum mengarah ke VPS ini — sertifikat kemungkinan gagal. Lanjutkan tetap?"
+        read -r -p "Lanjut? [y/N]: " REPLY
+        [[ ${REPLY:-} =~ ^[Yy]$ ]] || { info "Dibatalkan."; return 1; }
+    fi
+    jq_state --arg d "$new_domain" '.install.domain = $d' || return 1
+    [[ -n "$vps_ip" ]] && jq_state --arg v "$vps_ip" '.install.ip = $v' 2>/dev/null || true
+    if ! issue_cert "$new_domain" "$email"; then
+        error "Sertifikat gagal — domain di state sudah diganti, tapi Nginx/Xray masih pakai sertifikat lama."
+        return 1
+    fi
+    backup_config
+    write_nginx_conf "$new_domain"
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx
+    else
+        error "nginx -t gagal — cek /etc/nginx/conf.d/vps-manager.conf"
+        return 1
+    fi
+    apply_xray || { error "Xray gagal start dengan domain baru."; show_xray_failure; return 1; }
+    systemctl restart ws-epro 2>/dev/null || true
+    info "Domain diganti ke $new_domain."
+}
+
+feat_change_dns() {
+    echo "=== Change DNS Server ==="
+    echo "DNS di /etc/resolv.conf sekarang:"
+    grep -E '^nameserver' /etc/resolv.conf 2>/dev/null || echo "  (tidak ada)"
+    echo "  1) 1.1.1.1 + 8.8.8.8 (Cloudflare + Google)"
+    echo "  2) 8.8.8.8 + 8.8.4.4 (Google)"
+    echo "  3) Custom (ketik sendiri)"
+    echo "  0) Batal"
+    local p ns1 ns2
+    read -r -p "Pilih [0-3]: " p
+    case "$p" in
+        1) ns1=1.1.1.1; ns2=8.8.8.8 ;;
+        2) ns1=8.8.8.8; ns2=8.8.4.4 ;;
+        3) read -r -p "DNS utama: " ns1; read -r -p "DNS kedua (boleh kosong): " ns2 ;;
+        *) info "Dibatalkan."; return 0 ;;
+    esac
+    [[ "$ns1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { error "DNS tidak valid."; return 1; }
+    printf 'nameserver %s\n' "$ns1" > /etc/resolv.conf
+    [[ -n "$ns2" ]] && printf 'nameserver %s\n' "$ns2" >> /etc/resolv.conf
+    info "DNS diganti. Tes resolve: $(getent hosts archive.ubuntu.com | head -n 1 || echo GAGAL)"
+}
+
+feat_fix_haproxy() {
+    echo "=== Fixx Haproxy ==="
+    if ! command -v haproxy >/dev/null 2>&1; then
+        info "HAProxy TIDAK terpasang di script ini — port 80/443 dipegang Nginx, jadi HAProxy tidak dibutuhkan."
+        if ss -tlnp 2>/dev/null | grep -q ':8880\|:9444'; then
+            warn "Tapi ada proses di port 8880/9444 (sisa install lama). Matikan?"
+            read -r -p "Hentikan HAProxy lama? [y/N]: " REPLY
+            if [[ ${REPLY:-} =~ ^[Yy]$ ]]; then
+                systemctl stop haproxy 2>/dev/null || true
+                systemctl disable haproxy 2>/dev/null || true
+                info "HAProxy lama dihentikan."
+            fi
+        fi
+        return 0
+    fi
+    haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5
+    systemctl restart haproxy
+    sleep 2
+    if systemctl is-active --quiet haproxy; then info "HAProxy jalan."; else error "HAProxy gagal jalan — cek: journalctl -u haproxy -n 30"; fi
+    ss -tlnp 2>/dev/null | grep -E ':8880|:9444' || warn "Port 8880/9444 belum LISTEN."
+}
+
+feat_fix_nginx() {
+    echo "=== Fixx Nginx ==="
+    if nginx -t 2>&1; then
+        info "Config Nginx valid."
+    else
+        error "Config Nginx TIDAK valid:"
+        nginx -t 2>&1 | tail -n 10
+        local domain
+        domain=$(state_get '.install.domain // ""')
+        if [[ -n "$domain" ]]; then
+            warn "Membangun ulang config Nginx dari state..."
+            backup_config
+            write_nginx_conf "$domain"
+            nginx -t 2>&1 | tail -n 5
+        fi
+    fi
+    systemctl restart nginx
+    sleep 1
+    if systemctl is-active --quiet nginx; then info "Nginx jalan."; else error "Nginx gagal jalan — cek: journalctl -u nginx -n 30"; fi
+    ss -tlnp 2>/dev/null | grep -E ':80 |:443 ' || warn "Port 80/443 belum LISTEN."
+}
+
+feat_fix_ws_epro() {
+    echo "=== Fixx WS ePRO ==="
+    if ! python3 -c "import websockets" 2>/dev/null; then
+        warn "Modul Python 'websockets' tidak ada — menginstall..."
+        apt-get install -y python3-websockets 2>/dev/null || pip3 install --break-system-packages websockets 2>/dev/null || pip3 install websockets 2>/dev/null || error "Gagal install websockets."
+    fi
+    if [[ ! -f /opt/ws-epro/ws-epro.py ]]; then
+        warn "ws-epro belum terpasang — jalankan menu 1 dulu."
+        return 1
+    fi
+    systemctl restart ws-epro
+    sleep 2
+    if systemctl is-active --quiet ws-epro; then info "ws-epro jalan."; else error "ws-epro gagal jalan:"; journalctl -u ws-epro -n 15 --no-pager 2>/dev/null; fi
+    ss -tlnp 2>/dev/null | grep -E ':10090' || warn "Port 10090 belum LISTEN."
+}
+
+feat_fix_domain() {
+    echo "=== Fixx Domain ==="
+    local domain vps_ip resolved email
+    domain=$(state_get '.install.domain // ""')
+    email=$(state_get '.install.email // ""')
+    [[ -z "$domain" ]] && { error "Belum ada domain di state — jalankan menu 1 dulu."; return 1; }
+    vps_ip=$(detect_public_ip || true)
+    resolved=$(getent hosts "$domain" | awk '{print $1}' | head -n 1 || true)
+    info "Domain $domain resolve ke: ${resolved:-TIDAK RESOLVE}"
+    info "IP publik VPS: ${vps_ip:-tidak terdeteksi}"
+    [[ -n "$vps_ip" ]] && jq_state --arg v "$vps_ip" '.install.ip = $v' 2>/dev/null || true
+    if [[ -n "$resolved" && -n "$vps_ip" && "$resolved" != "$vps_ip" ]]; then
+        error "A record SALAH — ubah A record $domain ke $vps_ip di DNS registrar kamu, tunggu propagasi, lalu ulangi Fixx Domain."
+        return 1
+    fi
+    if [[ -z "$resolved" ]]; then
+        error "Domain tidak resolve — buat A record $domain ke ${vps_ip:-IP VPS} dulu."
+        return 1
+    fi
+    if ! issue_cert "$domain" "$email"; then
+        error "Sertifikat gagal diterbitkan — cek /tmp/acme-issue.log (15 baris terakhir):"
+        tail -n 15 /tmp/acme-issue.log 2>/dev/null || true
+        return 1
+    fi
+    backup_config
+    write_nginx_conf "$domain"
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx
+    else
+        error "nginx -t gagal."
+        return 1
+    fi
+    apply_xray || { error "Xray gagal start."; show_xray_failure; return 1; }
+    sleep 2
+    systemctl restart ws-epro 2>/dev/null || true
+    systemctl restart nginx 2>/dev/null || true
+    info "Domain diperbaiki: $domain (IP $vps_ip)."
+    feat_running_service
+}
+
+feat_fix_xray() {
+    echo "=== Fixx Xray ==="
+    if ! command -v xray >/dev/null 2>&1 && [[ ! -x /usr/local/bin/xray ]]; then
+        error "Xray belum terpasang — jalankan menu 1 dulu."
+        return 1
+    fi
+    build_xray_config
+    if xray -test -config /usr/local/etc/xray/config.json 2>&1 | tail -n 5; then
+        info "Config Xray valid (xray -test OK)."
+    else
+        error "Config Xray TIDAK valid — cek /usr/local/etc/xray/config.json"
+        return 1
+    fi
+    ensure_xray_logdir
+    systemctl restart xray
+    sleep 3
+    if systemctl is-active --quiet xray; then info "Xray jalan."; else error "Xray gagal jalan:"; show_xray_failure; fi
+    ss -tlnp 2>/dev/null | grep -E ':1000[1-5]|:10085' || warn "Port Xray 10001-10004/10085 belum LISTEN."
+}
+
+feat_clear_cache() {
+    echo "=== Clear Cache ==="
+    apt-get clean 2>/dev/null || true
+    rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
+    sync
+    info "Cache apt dibersihkan."
+}
+
+feat_clear_logs() {
+    echo "=== Clear Logs ==="
+    : > /var/log/xray/access.log 2>/dev/null || true
+    : > /var/log/xray/error.log 2>/dev/null || true
+    : > /var/log/vps-manager.log 2>/dev/null || true
+    journalctl --vacuum-size=100M 2>/dev/null || true
+    info "Log dibersihkan (Xray + vps-manager + journal di atas 100M)."
+}
+
+feat_clear_cache_file() {
+    echo "=== Clear Cache File ==="
+    find /tmp -type f -mtime +7 -delete 2>/dev/null || true
+    rm -rf /root/.cache/* 2>/dev/null || true
+    find /var/tmp -type f -mtime +30 -delete 2>/dev/null || true
+    info "File cache lama di /tmp dan /var/tmp dibersihkan."
+}
+
+feat_info_ports() {
+    echo "=== Info Service Port ==="
+    echo "Port layanan vps-manager (yang seharusnya LISTEN):"
+    echo "  SSH 22 | Nginx 80, 443 | Xray 10001-10004, 10085 | ws-epro 10090"
+    echo
+    ss -tlnp 2>/dev/null
+}
+
+feat_info_system() {
+    echo "=== Information System ==="
+    echo "OS      : $(grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2- | tr -d '"')"
+    echo "Kernel  : $(uname -r)"
+    echo "CPU     : $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ //') ($(nproc) core)"
+    echo "RAM     : $(free -h 2>/dev/null | awk '/^Mem:/ {print $3" / "$2}')"
+    echo "Disk    : $(df -h / 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')"
+    echo "Uptime  : $(uptime_str)"
+    echo "IP      : $(cached_public_ip)"
+    echo "Domain  : $(state_get '.install.domain // "—"')"
+    echo "Xray    : $(xray version 2>/dev/null | head -n 1 || echo 'belum terpasang')"
+    echo "Nginx   : $(nginx -v 2>&1 | head -n 1 || echo 'belum terpasang')"
+}
+
+feat_list_opensource() {
+    echo "=== List Open Source & Sewa Script ==="
+    echo "Komponen open source yang dipakai script ini:"
+    echo "  - Xray-core ......... $(xray version 2>/dev/null | head -n 1 || echo 'belum terpasang')"
+    echo "  - Nginx ............. $(nginx -v 2>&1 | head -n 1 || echo 'belum terpasang')"
+    echo "  - acme.sh ........... $(ls ~/.acme.sh/acme.sh 2>/dev/null && echo 'terpasang' || echo 'belum terpasang')"
+    echo "  - Python websockets . $(python3 -c 'import websockets; print(websockets.__version__)' 2>/dev/null || echo 'belum terpasang')"
+    echo "  - vnstat ............ $(vnstat --version 2>/dev/null | head -n 1 || echo 'belum terpasang')"
+    echo "  - fail2ban .......... $(fail2ban-client --version 2>/dev/null || echo 'belum terpasang')"
+    echo
+    echo "Script ini (vps-manager) adalah karya sendiri untuk VPS kamu —"
+    echo "bukan script sewa, tidak ada masa aktif / lisensi."
+}
+
+feat_antiddos() {
+    echo "=== Anti-DDoS Protection ==="
+    if ! command -v fail2ban-client >/dev/null 2>&1; then
+        echo "fail2ban belum terpasang. Pasang sekarang? (proteksi brute-force SSH)"
+        read -r -p "Install fail2ban? [y/N]: " REPLY
+        if [[ ${REPLY:-} =~ ^[Yy]$ ]]; then
+            fix_dns
+            apt-get update && apt-get install -y fail2ban
+            systemctl enable --now fail2ban
+        else
+            info "Dibatalkan — tanpa fail2ban, SSH hanya dilindungi password/SSH key."
+            return 0
+        fi
+    fi
+    if [[ ! -f /etc/fail2ban/jail.local ]]; then
+        printf '[sshd]\nenabled = true\nmaxretry = 5\nbantime = 3600\n' > /etc/fail2ban/jail.local
+        systemctl restart fail2ban
+    fi
+    sleep 1
+    fail2ban-client status 2>/dev/null || warn "fail2ban tidak jalan."
+    fail2ban-client status sshd 2>/dev/null || true
+}
+
+feat_script_other() {
+    echo "=== Script Other ==="
+    echo "Perintah yang terpasang di VPS ini:"
+    echo "  menu ......... buka menu vps-manager"
+    echo "  vps-manager .. perintah utama (menu + non-interaktif)"
+    echo
+    echo "Update script ke versi terbaru dari GitHub (roodyzain7/vps-manager)?"
+    read -r -p "Update sekarang? [y/N]: " REPLY
+    [[ ${REPLY:-} =~ ^[Yy]$ ]] || { info "Dibatalkan."; return 0; }
+    local tmp
+    tmp=$(mktemp /tmp/vps-manager-update.XXXXXX)
+    if curl -fsSL --max-time 30 https://raw.githubusercontent.com/roodyzain7/vps-manager/main/vps-manager.sh -o "$tmp"; then
+        if bash -n "$tmp"; then
+            cp /usr/local/bin/vps-manager "/usr/local/bin/vps-manager.bak.$(date '+%Y%m%d-%H%M')" 2>/dev/null || true
+            cp "$tmp" /usr/local/bin/vps-manager
+            chmod +x /usr/local/bin/vps-manager
+            info "Script diperbarui. Ketik 'menu' lagi untuk memakai versi baru."
+        else
+            error "File baru gagal verifikasi (bash -n) — tidak diganti."
+        fi
+    else
+        error "Gagal unduh dari GitHub — cek internet VPS."
+    fi
+    rm -f "$tmp"
+}
+
+feat_limit_speed() {
+    echo "=== Limit Speed ==="
+    local iface
+    iface=$(main_iface)
+    if ! command -v tc >/dev/null 2>&1; then
+        error "Perintah 'tc' tidak ada (paket iproute2). Install: apt-get install -y iproute2."
+        return 1
+    fi
+    echo "Interface: $iface"
+    echo "Qdisc saat ini:"
+    tc qdisc show dev "$iface" 2>/dev/null || true
+    echo
+    echo "Batas ini berlaku untuk SEMUA traffic VPS (termasuk SSH kamu)."
+    local lim
+    read -r -p "Batas download+upload (Mbit, 1-1000; 0 = hapus limit): " lim
+    if [[ "$lim" == "0" ]]; then
+        tc qdisc del dev "$iface" root 2>/dev/null || true
+        info "Limit dihapus."
+        return 0
+    fi
+    [[ "$lim" =~ ^[0-9]+$ ]] && (( lim >= 1 && lim <= 1000 )) || { error "Batas harus angka 1-1000."; return 1; }
+    tc qdisc replace dev "$iface" root handle 1: htb default 30
+    tc class add dev "$iface" parent 1: classid 1:1 htb rate "${lim}Mbit" ceil "${lim}Mbit"
+    tc class add dev "$iface" parent 1:1 classid 1:30 htb rate "${lim}Mbit" ceil "${lim}Mbit"
+    info "Limit total ${lim} Mbit diterapkan di $iface."
+}
+
+feat_xray_onoff() {
+    echo "=== Limit-on-off XRAY ==="
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        echo "Xray sedang ON. Matikan Xray (semua akun VPN berhenti)?"
+        read -r -p "Matikan Xray? [y/N]: " REPLY
+        if [[ ${REPLY:-} =~ ^[Yy]$ ]]; then
+            systemctl stop xray
+            systemctl disable xray 2>/dev/null || true
+            info "Xray dimatikan."
+        else
+            info "Dibatalkan — Xray tetap ON."
+        fi
+    else
+        echo "Xray sedang OFF. Nyalakan lagi?"
+        read -r -p "Nyalakan Xray? [y/N]: " REPLY
+        if [[ ${REPLY:-} =~ ^[Yy]$ ]]; then
+            systemctl enable xray 2>/dev/null || true
+            systemctl start xray
+            sleep 2
+            systemctl is-active --quiet xray && info "Xray jalan." || error "Xray gagal jalan — pakai 14.) Fixx Xray."
+        else
+            info "Dibatalkan — Xray tetap OFF."
+        fi
+    fi
+}
+
+feat_booster_cpu() {
+    echo "=== Boster CPU (multi-threading) ==="
+    echo "CPU: $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ //') ($(nproc) core)"
+    echo "Load: $(uptime | awk -F'load average:' '{print $2}')"
+    local gov
+    gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "")
+    if [[ -n "$gov" ]]; then
+        echo "Governor sekarang: $gov"
+        echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null >/dev/null && info "Governor diubah ke performance." || warn "Governor tidak bisa diubah (VPS cloud biasanya dikunci hypervisor)."
+    else
+        info "CPU governor tidak tersedia — di VPS cloud, CPU dikelola hypervisor, bukan dari dalam VPS."
+    fi
+    local pr pid
+    for pr in xray nginx ws-epro; do
+        pid=$(pgrep -x "$pr" 2>/dev/null | head -n 1 || true)
+        [[ -n "$pid" ]] && renice -n -5 -p "$pid" 2>/dev/null || true
+    done
+    info "Prioritas proses xray/nginx/ws-epro dinaikkan (nice -5)."
+}
+
+show_features_menu() {
+    printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
+    printf '  %bFEATURES%b\n' "$C_MAGENTA" "$C_RESET"
+    printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
+    echo "  1.) Running Service"
+    echo "  2.) Restart Service"
+    echo "  3.) Auto Reboot"
+    echo "  4.) Monitoring"
+    echo "  5.) SpeedTest"
+    echo "  6.) Delete All Account Exp"
+    printf '%b%b%-60s%b\n' "$C_BG_BLUE" "$C_GREEN" "  MENU FIXX" "$C_RESET"
+    echo "  7.) Change Banner"
+    echo "  8.) Change Domain"
+    echo "  9.) Change DNS Server"
+    echo " 10.) Fixx Haproxy"
+    echo " 11.) Fixx Nginx"
+    echo " 12.) Fixx WS ePRO"
+    echo " 13.) Fixx Domain"
+    echo " 14.) Fixx Xray"
+    printf '%b%b%-60s%b\n' "$C_BG_BLUE" "$C_GREEN" "  MENU CLEAR" "$C_RESET"
+    echo " 15.) Clear Cache"
+    echo " 16.) Clear Logs"
+    echo " 17.) Clear Cache File"
+    printf '%b%b%-60s%b\n' "$C_BG_BLUE" "$C_GREEN" "  INFORMATION" "$C_RESET"
+    echo " 18.) Info Service Port"
+    echo " 19.) Information System"
+    echo " 20.) List Open Source & Sewa Script"
+    printf '%b%b%-60s%b\n' "$C_BG_BLUE" "$C_GREEN" "  OTHER" "$C_RESET"
+    echo " 21.) Anti-DDoS Protection"
+    echo " 22.) Script Other"
+    echo " 23.) Limit Speed"
+    echo " 24.) Limit-on-off XRAY"
+    echo " 25.) Boster CPU (multi-threading)"
+    echo " 26.) Back to Menu"
+    echo "  x . EXIT"
+    printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
+}
+
+submenu_features() {
+    while true; do
+        clear 2>/dev/null || true
+        show_features_menu
+        local pilih=""
+        read -r -p "Pilih dari opsi [1-26 atau x]: " pilih || return 0
+        # Setiap aksi dibungkus "|| warn" supaya kegagalan kembali ke menu
+        # Features, bukan keluar script (pola yang sama seperti menu_loop).
+        case "$pilih" in
+            1)  feat_running_service || warn "Running Service gagal." ;;
+            2)  feat_restart_service || warn "Restart Service gagal." ;;
+            3)  feat_auto_reboot || warn "Auto Reboot gagal." ;;
+            4)  feat_monitoring || warn "Monitoring gagal." ;;
+            5)  feat_speedtest || warn "SpeedTest gagal." ;;
+            6)  feat_delete_expired || warn "Delete Expired gagal." ;;
+            7)  feat_change_banner || warn "Change Banner gagal." ;;
+            8)  feat_change_domain || warn "Change Domain gagal." ;;
+            9)  feat_change_dns || warn "Change DNS Server gagal." ;;
+            10) feat_fix_haproxy || warn "Fixx Haproxy gagal." ;;
+            11) feat_fix_nginx || warn "Fixx Nginx gagal." ;;
+            12) feat_fix_ws_epro || warn "Fixx WS ePRO gagal." ;;
+            13) feat_fix_domain || warn "Fixx Domain gagal." ;;
+            14) feat_fix_xray || warn "Fixx Xray gagal." ;;
+            15) feat_clear_cache || warn "Clear Cache gagal." ;;
+            16) feat_clear_logs || warn "Clear Logs gagal." ;;
+            17) feat_clear_cache_file || warn "Clear Cache File gagal." ;;
+            18) feat_info_ports || warn "Info Service Port gagal." ;;
+            19) feat_info_system || warn "Information System gagal." ;;
+            20) feat_list_opensource || warn "List Open Source gagal." ;;
+            21) feat_antiddos || warn "Anti-DDoS gagal." ;;
+            22) feat_script_other || warn "Script Other gagal." ;;
+            23) feat_limit_speed || warn "Limit Speed gagal." ;;
+            24) feat_xray_onoff || warn "Limit-on-off XRAY gagal." ;;
+            25) feat_booster_cpu || warn "Boster CPU gagal." ;;
+            26) return 0 ;;
+            x|X) exit 0 ;;
+            *)  error "Pilihan tidak valid: ${pilih}" ;;
+        esac
+        echo
+        feat_pause
+    done
+}
+
 show_header() {
     local mode domain xray_status total active expired expiring
     mode=$(state_get '.install.mode // ""')
@@ -2270,7 +2853,8 @@ show_menu() {
     printf '  %b03%b) %-24s %b09%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VMess" "$C_CYAN" "$C_RESET" "Link / QR Code"
     printf '  %b04%b) %-24s %b10%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VLESS" "$C_CYAN" "$C_RESET" "Uninstall Bersih"
     printf '  %b05%b) %-24s %b11%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun Trojan" "$C_CYAN" "$C_RESET" "Bot Telegram"
-    printf '  %b06%b) %-24s %b00%b) %s\n' "$C_CYAN" "$C_RESET" "List Semua Akun" "$C_CYAN" "$C_RESET" "Keluar"
+    printf '  %b06%b) %-24s %b12%b) %s\n' "$C_CYAN" "$C_RESET" "List Semua Akun" "$C_CYAN" "$C_RESET" "Features"
+    printf '  %b00%b) %s\n' "$C_CYAN" "$C_RESET" "Keluar"
     echo
 }
 menu_loop() {
@@ -2278,7 +2862,7 @@ menu_loop() {
         show_header
         show_menu
         local pilih=""
-        read -r -p "Pilih menu [0-11]: " pilih
+        read -r -p "Pilih menu [0-12]: " pilih || exit 0
         # PENTING: setiap aksi dibungkus "|| warn" supaya kegagalan (mis. install
         # batal karena port dipakai) kembali ke menu, BUKAN keluar script.
         # Sebelum perbaikan ini, "return 1" dari do_install + set -e membuat
@@ -2295,6 +2879,7 @@ menu_loop() {
             9)  show_link || warn "Tampilkan link gagal — kembali ke menu." ;;
             10) do_uninstall || warn "Uninstall tidak selesai — kembali ke menu." ;;
             11) submenu_bot || warn "Menu bot tidak selesai — kembali ke menu." ;;
+            12) submenu_features || warn "Menu features tidak selesai — kembali ke menu." ;;
             0)  echo "Sampai jumpa!"; exit 0 ;;
             *)  error "Pilihan tidak valid: ${pilih}" ;;
         esac

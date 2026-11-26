@@ -119,6 +119,57 @@ Kota/ISP diambil sekali dari ipinfo.io lalu disimpan di state (tidak
 menghambat menu berikutnya). Traffic MONTH/DAY dibaca dari `vnstat` bila
 terpasang (`apt install vnstat`); bila belum, tampil total sejak boot.
 
+## Features (menu 12)
+
+Submenu perbaikan dan utilitas, seperti menu FEATURES di screenshot
+referensi — 26 item dalam 5 bagian:
+
+```
+FEATURES
+  1.) Running Service          (status Xray/Nginx/ws-epro/Bot + port LISTEN)
+  2.) Restart Service          (restart Xray, Nginx, ws-epro, SSH berurutan)
+  3.) Auto Reboot              (atur / hapus reboot harian)
+  4.) Monitoring               (uptime, load, RAM, disk, traffic, top proses)
+  5.) SpeedTest                (speedtest-cli, atau unduh 10 MB Cloudflare)
+  6.) Delete All Account Exp   (hapus/expire-kan semua akun yang sudah lewat)
+MENU FIXX
+  7.) Change Banner            (ganti banner SSH)
+  8.) Change Domain            (ganti domain + terbitkan ulang sertifikat)
+  9.) Change DNS Server        (ganti resolver, mis. 1.1.1.1 / 8.8.8.8)
+ 10.) Fixx Haproxy             (restart + cek config; bila tidak terpasang,
+                                dilaporkan — script ini memakai Nginx)
+ 11.) Fixx Nginx               (nginx -t, bangun ulang config bila rusak,
+                                restart, cek port 80/443)
+ 12.) Fixx WS ePRO             (cek modul websockets, restart, cek port 10090)
+ 13.) Fixx Domain              (cek A record vs IP VPS, perbaiki sertifikat,
+                                bangun ulang Nginx/Xray, restart berurutan)
+ 14.) Fixx Xray                (xray -test, restart, cek port, tampilkan
+                                error.log bila gagal)
+MENU CLEAR
+ 15.) Clear Cache              (apt clean)
+ 16.) Clear Logs               (kosongkan log Xray/vps-manager, journal >100M)
+ 17.) Clear Cache File         (hapus file lama di /tmp dan /var/tmp)
+INFORMATION
+ 18.) Info Service Port        (semua port LISTEN + prosesnya)
+ 19.) Information System       (OS, kernel, CPU, RAM, disk, IP, versi Xray)
+ 20.) List Open Source & Sewa Script (komponen open source yang dipakai)
+OTHER
+ 21.) Anti-DDoS Protection     (install + aktifkan fail2ban untuk SSH)
+ 22.) Script Other             (update script dari GitHub, verifikasi bash -n)
+ 23.) Limit Speed              (batas total traffic via tc HTB, 0 = hapus)
+ 24.) Limit-on-off XRAY        (matikan / nyalakan layanan Xray)
+ 25.) Boster CPU (multi-threading) (governor performance bila tersedia,
+                                naikkan prioritas proses xray/nginx/ws-epro)
+ 26.) Back to Menu
+  x . EXIT
+```
+
+Catatan jujur: item 9 di screenshot aslinya "Change Domain NS" (untuk
+SlowDNS) — script ini tidak memakai SlowDNS, jadi item itu diganti Change
+DNS Server (resolver). Item 10 Fixx Haproxy hanya berlaku bila HAProxy
+memang terpasang dari install lama; instalasi vps-manager sendiri memakai
+Nginx di port 80/443 dan tidak butuh HAProxy.
+
 ## Perintah non-interaktif (otomasi)
 
 ```bash
