@@ -975,7 +975,7 @@ setup_ws_epro() {
         info "Modul websockets sudah ada."
     else
         info "Menginstall modul websockets (untuk jembatan SSH WS)..."
-        if ! (apt-get install -y python3-websockets 2>/dev/null || pip3 install --break-system-packages websockets 2>/dev/null || pip3 install websockets 2>/dev/null); then
+        if ! (timeout 120 apt-get install -y python3-websockets 2>/dev/null || timeout 120 pip3 install --break-system-packages websockets 2>/dev/null || timeout 120 pip3 install websockets 2>/dev/null); then
             warn "Gagal install websockets — SSH WS (/ssh-ws) tidak akan jalan; VMess/VLESS/Trojan tetap jalan."
             return 1
         fi
@@ -2235,7 +2235,7 @@ feat_pause() { read -r -p "Tekan Enter untuk kembali ke menu Features..." -r _; 
 feat_running_service() {
     echo "=== Running Service ==="
     local svc
-    for svc in ssh xray nginx ws-epro vps-bot; do
+    for svc in ssh xray nginx ws-epro vps-bot haproxy; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             printf '  %-10s : %bON%b\n' "$svc" "$C_GREEN" "$C_RESET"
         else
@@ -2420,28 +2420,126 @@ feat_change_dns() {
     info "DNS diganti. Tes resolve: $(getent hosts archive.ubuntu.com | head -n 1 || echo GAGAL)"
 }
 
-feat_fix_haproxy() {
-    echo "=== Fixx Haproxy ==="
+write_haproxy_conf() {
+    # Config HAProxy (8880 HTTP / 9444 TLS) untuk stack vps-manager saat ini:
+    # backend langsung ke inbound Xray (VMess 10001, VLESS 10002, Trojan 10003)
+    # dan ws-epro (SSH-WS 10090); https-in 9444 diteruskan ke Nginx :443.
+    # Pola yang sama seperti menu lama v1.9.0 (terbukti jalan di VPS ini),
+    # hanya port backend yang disesuaikan dengan vps-manager.
+    mkdir -p /etc/haproxy
+    [[ -f /etc/haproxy/haproxy.cfg ]] && cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak.$(date '+%Y%m%d-%H%M') 2>/dev/null || true
+    cat > /etc/haproxy/haproxy.cfg <<'HAPROXYEOF'
+global
+    log /dev/log local0
+    maxconn 4096
+
+defaults
+    log global
+    mode http
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+
+frontend http-in
+    bind *:8880
+    mode http
+    acl is_vmess path_beg /vmess
+    acl is_vless path_beg /vless
+    acl is_trojan path_beg /trojan
+    acl is_sshws path_beg /ssh-ws
+    use_backend v2ray-vmess if is_vmess
+    use_backend v2ray-vless if is_vless
+    use_backend v2ray-trojan if is_trojan
+    use_backend ws-epro if is_sshws
+    default_backend v2ray-vmess
+
+backend v2ray-vmess
+    mode http
+    server vmess 127.0.0.1:10001 check inter 5s fall 3 rise 2
+
+backend v2ray-vless
+    mode http
+    server vless 127.0.0.1:10002 check inter 5s fall 3 rise 2
+
+backend v2ray-trojan
+    mode http
+    server trojan 127.0.0.1:10003 check inter 5s fall 3 rise 2
+
+backend ws-epro
+    mode http
+    server wsepro 127.0.0.1:10090 check inter 5s fall 3 rise 2
+
+frontend https-in
+    bind *:9444
+    mode tcp
+    default_backend xray-tls
+
+backend xray-tls
+    mode tcp
+    server xray 127.0.0.1:443 check inter 5s fall 3 rise 2
+HAPROXYEOF
+}
+
+setup_haproxy() {
+    # Install HAProxy + config + nyalakan. Dipanggil dari Features 10.
+    # (Menu 1 sengaja tidak memasangnya: port 80/443 sudah dipegang Nginx.)
     if ! command -v haproxy >/dev/null 2>&1; then
-        info "HAProxy TIDAK terpasang di script ini — port 80/443 dipegang Nginx, jadi HAProxy tidak dibutuhkan."
-        if ss -tlnp 2>/dev/null | grep -q ':8880\|:9444'; then
-            warn "Tapi ada proses di port 8880/9444 (sisa install lama). Matikan?"
-            read -r -p "Hentikan HAProxy lama? [y/N]: " REPLY
-            if [[ ${REPLY:-} =~ ^[Yy]$ ]]; then
-                systemctl stop haproxy 2>/dev/null || true
-                systemctl disable haproxy 2>/dev/null || true
-                info "HAProxy lama dihentikan."
-            fi
+        info "Menginstall HAProxy..."
+        fix_dns
+        if ! timeout 180 apt-get update 2>/dev/null; then warn "apt-get update lambat/gagal — lanjut install."; fi
+        if ! timeout 180 apt-get install -y haproxy 2>/dev/null; then
+            error "Gagal install HAProxy — cek internet/DNS VPS (coba Features 9 ganti DNS)."
+            return 1
         fi
-        return 0
     fi
-    haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5
+    write_haproxy_conf
+    if ! haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5; then
+        error "Config HAProxy TIDAK valid."
+        return 1
+    fi
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow 8880/tcp 2>/dev/null || true
+        ufw allow 9444/tcp 2>/dev/null || true
+    fi
+    systemctl enable haproxy 2>/dev/null || true
     systemctl restart haproxy
     sleep 2
-    if systemctl is-active --quiet haproxy; then info "HAProxy jalan."; else error "HAProxy gagal jalan — cek: journalctl -u haproxy -n 30"; fi
+    if systemctl is-active --quiet haproxy; then
+        info "HAProxy jalan (8880 HTTP, 9444 TLS)."
+    else
+        error "HAProxy gagal jalan:"
+        journalctl -u haproxy -n 20 --no-pager 2>/dev/null || true
+        return 1
+    fi
     ss -tlnp 2>/dev/null | grep -E ':8880|:9444' || warn "Port 8880/9444 belum LISTEN."
 }
 
+feat_fix_haproxy() {
+    echo "=== Fixx Haproxy ==="
+    if ! command -v haproxy >/dev/null 2>&1; then
+        warn "HAProxy belum terpasang — menginstall sekarang."
+        setup_haproxy
+        return $?
+    fi
+    if ! haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5; then
+        warn "Config HAProxy rusak — menulis ulang dari template vps-manager..."
+        write_haproxy_conf
+        haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5 || { error "Config baru tetap tidak valid."; return 1; }
+    fi
+    systemctl restart haproxy
+    sleep 2
+    if systemctl is-active --quiet haproxy; then
+        info "HAProxy jalan."
+        echo "--- Backend (harus UP bila Xray/ws-epro/Nginx jalan) ---"
+        echo "  8880 -> VMess 10001 / VLESS 10002 / Trojan 10003 / SSH-WS 10090"
+        echo "  9444 -> Nginx :443 (TLS)"
+    else
+        error "HAProxy gagal jalan:"
+        journalctl -u haproxy -n 20 --no-pager 2>/dev/null || true
+        return 1
+    fi
+    ss -tlnp 2>/dev/null | grep -E ':8880|:9444' || warn "Port 8880/9444 belum LISTEN."
+}
 feat_fix_nginx() {
     echo "=== Fixx Nginx ==="
     if nginx -t 2>&1; then
@@ -2466,20 +2564,40 @@ feat_fix_nginx() {
 
 feat_fix_ws_epro() {
     echo "=== Fixx WS ePRO ==="
-    if ! python3 -c "import websockets" 2>/dev/null; then
-        warn "Modul Python 'websockets' tidak ada — menginstall..."
-        apt-get install -y python3-websockets 2>/dev/null || pip3 install --break-system-packages websockets 2>/dev/null || pip3 install websockets 2>/dev/null || error "Gagal install websockets."
+    # SSH-WS OFF di menu biasanya karena ws-epro belum pernah terpasang
+    # (menu 1 belum dijalankan ulang sesudah versi ws-epro) atau servicenya
+    # gagal start (modul websockets hilang / file rusak). Perbaiki semua itu.
+    if [[ ! -f /opt/ws-epro/ws-epro.py || ! -f /etc/systemd/system/ws-epro.service ]]; then
+        warn "ws-epro belum terpasang — menginstall sekarang."
+        setup_ws_epro
+    else
+        if ! python3 -c "import websockets" 2>/dev/null; then
+            warn "Modul Python 'websockets' tidak ada — menginstall..."
+            if ! (timeout 120 apt-get install -y python3-websockets 2>/dev/null || timeout 120 pip3 install --break-system-packages websockets 2>/dev/null || timeout 120 pip3 install websockets 2>/dev/null); then
+                error "Gagal install websockets — SSH WS tetap tidak bisa jalan."
+                return 1
+            fi
+        fi
+        if ! python3 -m py_compile /opt/ws-epro/ws-epro.py 2>/dev/null; then
+            warn "File ws-epro.py rusak — menulis ulang."
+            setup_ws_epro
+        else
+            systemctl restart ws-epro
+        fi
     fi
-    if [[ ! -f /opt/ws-epro/ws-epro.py ]]; then
-        warn "ws-epro belum terpasang — jalankan menu 1 dulu."
+    sleep 2
+    if systemctl is-active --quiet ws-epro; then
+        info "ws-epro jalan."
+    else
+        error "ws-epro gagal jalan — log 20 baris terakhir:"
+        journalctl -u ws-epro -n 20 --no-pager 2>/dev/null || true
+        local holder
+        holder=$(ss -tlnp 2>/dev/null | grep ':10090' || true)
+        [[ -n "$holder" ]] && warn "Port 10090 sudah dipakai: $holder"
         return 1
     fi
-    systemctl restart ws-epro
-    sleep 2
-    if systemctl is-active --quiet ws-epro; then info "ws-epro jalan."; else error "ws-epro gagal jalan:"; journalctl -u ws-epro -n 15 --no-pager 2>/dev/null; fi
     ss -tlnp 2>/dev/null | grep -E ':10090' || warn "Port 10090 belum LISTEN."
 }
-
 feat_fix_domain() {
     echo "=== Fixx Domain ==="
     local domain vps_ip resolved email
@@ -2818,7 +2936,7 @@ show_header() {
     if systemctl is-active --quiet ws-epro 2>/dev/null; then ws_status="${C_GREEN}ON${C_RESET}"; else ws_status="${C_RED}OFF${C_RESET}"; fi
     if [[ "$(bot_status)" == "ON" ]]; then bot_stat="${C_GREEN}ON${C_RESET}"; else bot_stat="${C_RED}OFF${C_RESET}"; fi
     if [[ -z "$mode" ]]; then health="${C_YELLOW}BELUM INSTALL${C_RESET}";
-    elif systemctl is-active --quiet xray 2>/dev/null && systemctl is-active --quiet nginx 2>/dev/null; then health="${C_GREEN}GOOD${C_RESET}";
+    elif systemctl is-active --quiet xray 2>/dev/null && systemctl is-active --quiet nginx 2>/dev/null && systemctl is-active --quiet ws-epro 2>/dev/null; then health="${C_GREEN}GOOD${C_RESET}";
     else health="${C_YELLOW}PERIKSA${C_RESET}"; fi
     local os_name ram_str swap_str up_str ip_pub city isp
     os_name=$(grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2- | tr -d '"')

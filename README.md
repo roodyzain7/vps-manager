@@ -136,11 +136,13 @@ MENU FIXX
   7.) Change Banner            (ganti banner SSH)
   8.) Change Domain            (ganti domain + terbitkan ulang sertifikat)
   9.) Change DNS Server        (ganti resolver, mis. 1.1.1.1 / 8.8.8.8)
- 10.) Fixx Haproxy             (restart + cek config; bila tidak terpasang,
-                                dilaporkan — script ini memakai Nginx)
+ 10.) Fixx Haproxy             (install bila belum ada + config backend ke
+                                Xray 10001-10003 / ws-epro 10090 / Nginx 443,
+                                lalu restart; port 8880 HTTP + 9444 TLS)
  11.) Fixx Nginx               (nginx -t, bangun ulang config bila rusak,
                                 restart, cek port 80/443)
- 12.) Fixx WS ePRO             (cek modul websockets, restart, cek port 10090)
+ 12.) Fixx WS ePRO             (install ulang bila belum terpasang, cek modul
+                                websockets, restart, cek port 10090)
  13.) Fixx Domain              (cek A record vs IP VPS, perbaiki sertifikat,
                                 bangun ulang Nginx/Xray, restart berurutan)
  14.) Fixx Xray                (xray -test, restart, cek port, tampilkan
