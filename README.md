@@ -1,0 +1,234 @@
+# VPS Manager — SSH, VMess, VLESS, Trojan (Xray-core)
+
+Script Bash lengkap untuk mengelola akun SSH, VMess, VLESS, dan Trojan di satu VPS
+Linux, memakai **Xray-core resmi**. Semua lewat menu terminal — tidak perlu panel
+web. Untuk administrasi server sendiri (legal), bukan backdoor.
+
+## Ringkas
+
+| Item | Keterangan |
+|---|---|
+| OS target | Ubuntu 22.04 / 24.04 atau Debian 12, fresh install, akses root |
+| Core | Xray-core resmi (script install XTLS) |
+| Config Xray | `/usr/local/etc/xray/config.json` |
+| State akun | `/etc/vps-manager/state.json` (chmod 600) |
+| Log | `/var/log/vps-manager.log` |
+| Nginx | `/etc/nginx/conf.d/vps-manager.conf` (mode domain) |
+| Sertifikat | `/etc/vps-manager/ssl/` (acme.sh, EC-256, auto-renew) |
+| Cron expired | `/etc/cron.d/vps-manager` (cek harian jam 02:00) |
+
+## Cara install (1 perintah)
+
+Di VPS sebagai root:
+
+```bash
+curl -fsSL -o vps-manager.sh <URL-FILE-vps-manager.sh>
+chmod +x vps-manager.sh
+bash vps-manager.sh
+```
+
+Lalu pilih menu **1) Install/Update dependensi & Xray** dan pilih mode:
+
+- **1) Domain + TLS** — butuh domain yang A record-nya sudah mengarah ke IP VPS,
+  dan email untuk Let's Encrypt. Sertifikat diterbitkan otomatis via acme.sh
+  (standalone, EC-256). Nginx melayani VMess/VLESS/Trojan/SSH di **dua port**:
+  **80 non-TLS** dan **443 TLS**, dengan path tetap `/vmess`, `/vless`,
+  `/trojan`, dan `/ssh-ws` (SSH WS via jembatan ws-epro ke SSH 22).
+- **2) REALITY tanpa domain** — tidak butuh domain/sertifikat. Keypair REALITY
+  dibuat otomatis (`xray x25519`). VLESS jalan di TCP 443 dengan REALITY,
+  VMess tetap lewat WS port 10001 (tanpa TLS).
+
+Install bersifat **idempotent**: dijalankan ulang tidak menghapus akun yang
+sudah ada — config Xray selalu dibangun ulang dari `state.json`.
+
+> Setelah install, script tersalin ke `/usr/local/bin/vps-manager`, jadi cukup
+> ketik `vps-manager` untuk membuka menu.
+
+## Link permanen (tidak expired)
+
+Link unduhan dari chat selalu kedaluwarsa — jadi script ini **menyajikan
+dirinya sendiri** dari domainmu: sesudah install (menu 1), file
+`/usr/local/bin/vps-manager` bisa diunduh kapan saja dari:
+
+```
+https://<domain-kamu>/vps-manager.sh
+```
+
+Install di VPS lain / install ulang, cukup:
+
+```bash
+curl -fsSL https://<domain-kamu>/vps-manager.sh -o /usr/local/bin/vps-manager && chmod +x /usr/local/bin/vps-manager && vps-manager
+```
+
+Link ini hidup selama VPS-mu hidup. Cek dengan
+`vps-manager --check` (bagian "Link permanen"). Salinan yang sudah terinstall
+di `/usr/local/bin/vps-manager` juga permanen — perintah `menu` selalu bisa
+dipakai di VPS itu tanpa mengunduh apa pun.
+
+## Cara pakai menu
+
+Sesudah install, cukup ketik `menu` di terminal — menu langsung muncul dengan
+hasil instalasi yang sudah ada (mode, domain, status Xray, jumlah akun):
+
+```bash
+menu
+```
+
+(`vps-manager` juga bisa — `menu` hanya pintasan ke perintah yang sama.
+Pintasan dibuat otomatis saat install; bila install dari versi lama, cukup
+jalankan `vps-manager` sekali.)
+
+```
+============================================================
+   VPS MANAGER — SSH / VMess / VLESS / Trojan (Xray-core)
+============================================================
+  Mode   : domain
+  Domain : vpn.domainkamu.com
+  Xray   : ON   |   Akun: 3
+------------------------------------------------------------
+  1) Install/Update dependensi & Xray
+  2) Buat akun SSH
+  3) Buat akun VMess
+  4) Buat akun VLESS
+  5) Buat akun Trojan
+  6) List semua akun + status expired
+  7) Hapus akun
+  8) Perpanjang masa aktif akun
+  9) Tampilkan link/config + QR code
+  10) Uninstall bersih
+  0) Keluar
+```
+
+## Perintah non-interaktif (otomasi)
+
+```bash
+# Install
+bash vps-manager.sh --install --mode domain --domain vpn.domainkamu.com --email admin@domainkamu.com
+bash vps-manager.sh --install --mode reality
+
+# Buat akun
+bash vps-manager.sh --create ssh    --name user1 --days 30
+bash vps-manager.sh --create ssh    --name user1 --days 30 --password Rahasia123
+bash vps-manager.sh --create vmess  --name user1 --days 30 --limit-ip 2
+bash vps-manager.sh --create vless  --name user1 --days 30 --transport ws
+bash vps-manager.sh --create trojan --name user1 --days 30
+
+# Lihat / hapus / perpanjang / tampilkan link
+bash vps-manager.sh --list
+bash vps-manager.sh --delete --protocol vmess --name user1
+bash vps-manager.sh --renew  --protocol vless --name user1 --days 30
+bash vps-manager.sh --show   --protocol trojan --name user1
+bash vps-manager.sh --check-expired
+bash vps-manager.sh --uninstall
+bash vps-manager.sh --help
+```
+
+## Contoh output link
+
+**VMess** (menu 9) — link `vmess://` (JSON base64) + QR di terminal:
+
+```
+================= LINK VMESS: user1 =================
+vmess://eyJ2IjoiMiIsInBzIjoidXNlcjEiLCJhZGQiOiJ2cG4uZG9tYWlua2FtdS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiIxMjM0NTY3OC05YWJjLTRkZWYtOTAxMi0zNDU2Nzg5YWJjZGUiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJ2cG4uZG9tYWlua2FtdS5jb20iLCJwYXRoIjoiL3ZtZXNzIiwidGxzIjoidGxzIiwic25pIjoidnBuLmRvbWFpbmthbXUuY29tIn0=
+```
+
+**VLESS (mode domain, WS+TLS):**
+
+```
+vless://12345678-9abc-4def-9012-3456789abcde@vpn.domainkamu.com:443?encryption=none&security=tls&type=ws&host=vpn.domainkamu.com&path=/vless#user1
+```
+
+Setiap akun menampilkan **dua link** (menu 9): TLS port 443 dan non-TLS port 80,
+misalnya VLESS non-TLS:
+
+```
+vless://12345678-9abc-4def-9012-3456789abcde@vpn.domainkamu.com:80?encryption=none&security=none&type=ws&host=vpn.domainkamu.com&path=/vless#user1-nontls
+```
+
+**VLESS (mode REALITY):**
+
+```
+vless://12345678-9abc-4def-9012-3456789abcde@1.2.3.4:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=PUBLIK_KEY_DISINI&sid=a1b2c3d4e5f60708&type=tcp#user1
+```
+
+**Trojan (mode domain, WS+TLS):**
+
+```
+trojan://PasswordKuat20Karakter@vpn.domainkamu.com:443?security=tls&type=ws&host=vpn.domainkamu.com&path=/trojan#user1
+```
+
+QR code tampil langsung di terminal (ANSI, via `qrencode`), dan bisa disimpan
+sebagai PNG ke `/root/<nama>-qr.png` bila diminta. Import link ke **v2rayNG**,
+NekoBox, Streisand, atau FoXray.
+
+> Contoh di atas memakai nilai ilustrasi (UUID/password/domain diganti) —
+> link asli dibuat dari akunmu sendiri.
+
+## Cara uji
+
+```bash
+# 1. Status service
+systemctl status xray
+systemctl status nginx
+
+# 2. Validasi config
+xray -test -config /usr/local/etc/xray/config.json
+nginx -t
+
+# 3. Port yang harus LISTEN (atau cukup: vps-manager --check)
+ss -tlnp | grep -E ':(22|80|443|10001|10002|10003|10090)\b'
+vps-manager --check   # cek rantai Nginx -> Xray -> path WS (80 & 443)
+
+# 4. Import link di v2rayNG — harus konek, lalu cek IP berubah
+# 5. Cek expiry
+bash vps-manager.sh --list
+
+# 6. Lihat log bila ada yang aneh
+tail -n 50 /var/log/vps-manager.log
+journalctl -u xray -n 50 --no-pager
+```
+
+## Troubleshooting
+
+| Gejala | Penyebab umum & perbaikan |
+|---|---|
+| Sertifikat gagal terbit | Domain belum resolve ke IP VPS (`getent hosts domainkamu` harus = IP VPS), atau port 80 diblokir/dipakai. Perbaiki DNS, tunggu propagasi, ulangi menu 1. Log: `/tmp/acme-issue.log`. |
+| Port 80/443 bentrok | Proses lain memakai port itu (`ss -tlnp \| grep :443`). Sejak versi perbaikan 27 Nov 2026, script tidak lagi langsung gagal: ia menampilkan proses yang memegang port (mis. V2Ray/Nginx/HAProxy lama) dan menanyakan izin untuk menghentikannya sementara — layanan lama itu tetap berhenti karena Nginx baru butuh 80/443. Jawab `y` untuk lanjut, `n` untuk batal dan kembali ke menu. |
+| Xray tidak start | Config tidak valid — script otomatis rollback ke backup terakhir. Cek manual: `xray -test -config /usr/local/etc/xray/config.json` dan `journalctl -u xray -n 50`. Backup ada di `/etc/vps-manager/backups/`. |
+| Akun dibuat tapi tidak konek | Pastikan mode & transport cocok (WS butuh domain+TLS; REALITY butuh SNI `www.microsoft.com` & `flow=xtls-rprx-vision`). Cek akun masih `active` di `--list`, bukan `expired`. |
+| Lupa password SSH akun | Password SSH tidak disimpan di server (sengaja). Reset manual: `passwd <nama-user>` sebagai root, lalu perpanjang bila perlu. |
+| Domain belum resolve | `curl https://api.ipify.org` untuk IP VPS, lalu samakan A record domain dengan IP itu. Installer memberi peringatan bila tidak cocok. |
+| SSH terkunci | Script tidak pernah mengubah port 22 dan UFW selalu allow 22 dulu sebelum enable. Bila tetap terkunci, akses via console provider VPS. |
+
+## Uninstall bersih
+
+Menu **10) Uninstall bersih** (atau `bash vps-manager.sh --uninstall`) — ketik
+`YA` untuk konfirmasi. Yang dihapus: service & config Xray, config Nginx,
+state akun, cron, dan user SSH yang tercatat di `state.json`. Yang **tidak
+pernah** dihapus: OpenSSH port 22, user root, user sistem (UID < 1000).
+
+## Asumsi
+
+- VPS fresh install, root, internet lancar, dan port 22/80/443 bisa dibuka.
+- Satu port = satu inbound Xray: di mode REALITY, port 443 hanya untuk VLESS;
+  VMess di mode itu lewat WS port 10001 tanpa TLS (port dibuka di UFW).
+- `flow=xtls-rprx-vision` hanya dipakai VLESS transport TCP/REALITY; VLESS WS
+  tidak memakai flow.
+- Limit IP dicatat di `state.json` saja — Xray tidak punya penegakan limit IP
+  bawaan, jadi angka itu bukan pembatasan aktif (ditulis jujur di script).
+- SSH over WebSocket (`/ssh-ws` di Nginx): Nginx sendiri tidak menerjemahkan
+  frame WebSocket menjadi TCP mentah SSH — klien SSH-WS butuh jembatan WS→TCP
+  (mis. ws-epro). SSH normal port 22 selalu tersedia dan itulah jalur utama.
+- Zona waktu log: Asia/Jakarta.
+
+## Keamanan
+
+- `set -Eeuo pipefail` + trap error yang menulis ke log.
+- Validasi input ketat (username, UUID v4, domain, email, hari 1–365, port).
+- `state.json` chmod 600, ditulis atomik (file tmp + `mv`).
+- Backup config + state sebelum setiap perubahan; validasi `xray -test`
+  sebelum reload; rollback otomatis bila gagal.
+- UFW: allow 22, 80, 443 (dan 10001 di mode reality) — allow 22 selalu dulu.
+- Semua aksi destruktif minta konfirmasi ketik `YA`.
+- Tanpa `eval`, tanpa interpolasi shell mentah, tanpa kredensial hardcode.
+- Audit: semua aksi tercatat di `/var/log/vps-manager.log`.
