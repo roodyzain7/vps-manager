@@ -1488,8 +1488,14 @@ check_expired() {
 show_link() {
     # $1=protocol $2=name
     local proto="${1:-}" name="${2:-}"
-    if [[ -z "$proto" ]]; then read -r -p "Protokol (vmess/vless/trojan/ssh): " proto; fi
-    if [[ -z "$name" ]]; then read -r -p "Nama akun: " name; fi
+    if [[ -z "$proto" ]]; then
+        if [[ -t 0 ]]; then read -r -p "Protokol (vmess/vless/trojan/ssh): " proto;
+        else error "Protokol wajib diisi (--protocol)."; return 1; fi
+    fi
+    if [[ -z "$name" ]]; then
+        if [[ -t 0 ]]; then read -r -p "Nama akun: " name;
+        else error "Nama akun wajib diisi (--name)."; return 1; fi
+    fi
     if ! state_account_exists "$proto" "$name"; then
         error "Akun ${proto}/${name} tidak ditemukan."
         return 1
@@ -1584,13 +1590,19 @@ show_link() {
     fi
     echo
     # QR code di terminal (butuh qrencode) + opsi simpan PNG.
+    # PENTING: tanya simpan PNG HANYA bila stdin adalah terminal. Saat
+    # dipanggil bot Telegram (stdin=/dev/null), `read` tanpa penjaga ini
+    # gagal EOF dan `set -e` + ERR trap mematikan script — hasil pembuatan
+    # akun tidak pernah sampai ke bot.
     if command -v qrencode >/dev/null 2>&1; then
         qrencode -t ANSIUTF8 "$link"
-        local save=""
-        read -r -p "Simpan QR sebagai PNG di /root/${name}-qr.png? [y/N]: " save
-        if [[ "${save:-}" =~ ^[Yy]$ ]]; then
-            qrencode -o "/root/${name}-qr.png" "$link"
-            info "QR disimpan: /root/${name}-qr.png"
+        if [[ -t 0 ]]; then
+            local save=""
+            read -r -p "Simpan QR sebagai PNG di /root/${name}-qr.png? [y/N]: " save
+            if [[ "${save:-}" =~ ^[Yy]$ ]]; then
+                qrencode -o "/root/${name}-qr.png" "$link"
+                info "QR disimpan: /root/${name}-qr.png"
+            fi
         fi
     else
         warn "qrencode tidak tersedia — install dengan: apt install qrencode"
@@ -1813,6 +1825,10 @@ def run_cli(args, timeout=180):
     try:
         proc = subprocess.run(
             [VPS_MANAGER] + args,
+            # stdin selalu /dev/null: CLI tidak boleh menggantung menunggu
+            # input (prompt apa pun langsung EOF), dan prompt yang tidak
+            # terjaga TTY tidak akan memblokir bot sampai timeout 180 detik.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,

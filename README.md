@@ -238,6 +238,13 @@ VPS tidak bisa mencapai api.telegram.org (DNS), chat dari akun/Chat ID
 yang berbeda dari yang dikonfigurasi, atau belum `/start` ke bot yang
 benar. Diagnosa menampilkan semuanya — termasuk username bot yang benar.
 
+**Buat akun via bot tidak menampilkan hasil?** Itu bug di `show_link`:
+prompt "Simpan QR sebagai PNG?" tidak terjaga terminal, jadi saat bot
+menjalankan pembuatan akun, `read` gagal (stdin kosong) dan script mati
+tepat sebelum hasil dikirim. Sudah diperbaiki — prompt itu sekarang hanya
+muncul di terminal interaktif, dan bot menjalankan CLI dengan stdin
+`/dev/null` supaya tidak pernah menggantung.
+
 atau langsung:
 
 ```bash
