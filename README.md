@@ -244,7 +244,7 @@ konfirmasi bot tetap teks biasa.
 ## Features (menu 12)
 
 Submenu perbaikan dan utilitas, seperti menu FEATURES di screenshot
-referensi — 29 item dalam 5 bagian:
+referensi — 30 item dalam 5 bagian:
 
 ```
 FEATURES
@@ -347,6 +347,17 @@ OTHER
                                 karena binary sudah ada. Running Service
                                 menampilkan versi aktif, misal
                                 "Dropbear 2019.78".)
+ 30.) Install SlowDNS     (DNS Tunnel dnstt: dnstt-server di UDP
+                                <IP_VPS>:53 (domain slow.<domain>) ->
+                                sslh 127.0.0.1:2222 -> SSH 22 atau Xray
+                                VLESS TCP 127.0.0.1:10086. Build dari
+                                source resmi bamsoftware.com (Go).
+                                Kunci di /etc/dnstt/server.key+pub.
+                                WAJIB tambah record DNS: A ns-slow ->
+                                IP VPS, NS slow -> ns-slow.<domain>.
+                                Klien: aplikasi SlowDNS / HTTP Custom
+                                mode SlowDNS. Implementasi sendiri —
+                                TIDAK pakai file dari zip SLOWDNSWIBU.)
   x . EXIT
 ```
 

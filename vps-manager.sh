@@ -91,6 +91,15 @@ readonly DROPBEAR_URL_OLD="https://matt.ucc.asn.au/dropbear/releases/dropbear-20
 readonly DROPBEAR_VER_NEW="2026.94"
 readonly DROPBEAR_URL_NEW="https://matt.ucc.asn.au/dropbear/releases/dropbear-2026.94.tar.bz2"
 readonly DROPBEAR_BIN_DIR="/usr/local/sbin"
+# SlowDNS (DNS Tunnel, dnstt) — implementasi sendiri dari source resmi.
+# dnstt-server di UDP <IP_VPS>:53 -> sslh 127.0.0.1:2222 -> SSH 22 /
+# Xray VLESS TCP 127.0.0.1:10086. Domain tunnel: slow.<domain>.
+readonly SLOWDNS_DIR="/etc/dnstt"
+readonly SLOWDNS_BIN="/usr/local/bin/dnstt-server"
+readonly SLOWDNS_SRC_URL="https://www.bamsoftware.com/software/dnstt/dnstt-20220208.zip"
+readonly SLOWDNS_UDP_PORT=53
+readonly SLOWDNS_MUX_PORT=2222
+readonly SLOWDNS_XRAY_PORT=10086
 readonly OVPN_DIR="/etc/openvpn/server"
 readonly OVPN_WS_DIR="/opt/ws-ovpn"
 
@@ -546,6 +555,10 @@ build_xray_config() {
                settings: {clients: $ss},
                streamSettings: {network: "grpc", grpcSettings: {serviceName: "ss-grpc"}},
                tag: "ss-grpc"},
+              {port: 10086, listen: "127.0.0.1", protocol: "vless",
+               settings: {clients: $vless, decryption: "none"},
+               streamSettings: {network: "tcp"},
+               tag: "vless-slowdns"},
               {port: 10085, listen: "127.0.0.1", protocol: "dokodemo-door",
                settings: {address: "127.0.0.1"},
                tag: "api"}
@@ -1048,6 +1061,175 @@ install_reality() {
     jq_state '.install.ws_paths.vmess="/vmess" | .install.ws_paths.vless="/vless" | .install.ws_paths.trojan="/trojan"'
     info "Keypair REALITY dibuat. Public key (untuk link klien): ${pub}"
     info "ShortId: ${sid} | SNI tujuan: www.microsoft.com"
+}
+
+# SlowDNS (DNS Tunnel) — dnstt-server + sslh + Xray VLESS TCP.
+# Implementasi sendiri dari source resmi dnstt (bamsoftware.com, David
+# Fifield, public domain/CC0). TIDAK memakai file dari zip SLOWDNSWIBU.
+# Alur: klien SlowDNS -> DNS query *.slow.<domain> (UDP 53, dnstt-server)
+# -> sslh 127.0.0.1:2222 -> SSH 127.0.0.1:22 atau Xray VLESS 10086.
+# Syarat: user tambah record DNS (A ns-slow -> IP VPS, NS slow ->
+# ns-slow.<domain>) di penyedia domain — lihat slowdns_info().
+slowdns_domain() {
+    # Domain tunnel SlowDNS: slow.<domain utama>.
+    local d
+    d=$(state_get '.install.domain // ""' 2>/dev/null)
+    if [[ -n "$d" ]]; then echo "slow.$d"; else echo ""; fi
+}
+
+slowdns_build_dnstt() {
+    # Build dnstt-server dari source resmi (bamsoftware.com) dengan Go.
+    # Return 0 bila binary sudah ada atau berhasil di-build.
+    if [[ -x "$SLOWDNS_BIN" ]]; then
+        info "dnstt-server sudah ada ($SLOWDNS_BIN)."
+        return 0
+    fi
+    info "Build dnstt-server dari source resmi (butuh Go, ~1-2 menit)..."
+    fix_dns
+    DEBIAN_FRONTEND=noninteractive apt-get install -y golang-go unzip 2>/dev/null \
+        || { error "Gagal install Go/unzip — cek apt."; return 1; }
+    local tmpdir
+    tmpdir=$(mktemp -d /tmp/dnstt-build-XXXXXX) || { error "Gagal buat folder build."; return 1; }
+    if ! curl -fsSL --max-time 120 --retry 2 "$SLOWDNS_SRC_URL" -o "$tmpdir/dnstt.zip" 2>/dev/null; then
+        error "Gagal unduh source dnstt dari $SLOWDNS_SRC_URL — cek internet/DNS."
+        rm -rf "$tmpdir"; return 1
+    fi
+    if ! unzip -q "$tmpdir/dnstt.zip" -d "$tmpdir" 2>/dev/null; then
+        error "Source dnstt rusak / gagal ekstrak."
+        rm -rf "$tmpdir"; return 1
+    fi
+    local srcdir
+    srcdir=$(find "$tmpdir" -mindepth 1 -maxdepth 1 -type d -name "dnstt-20*" | head -1)
+    [[ -n "$srcdir" ]] || { error "Folder source dnstt tidak ketemu."; rm -rf "$tmpdir"; return 1; }
+    (
+        cd "$srcdir/dnstt-server" || exit 1
+        go build -o "$SLOWDNS_BIN" . || exit 1
+    ) || {
+        error "Build dnstt-server gagal."
+        rm -rf "$tmpdir"; return 1
+    }
+    chmod +x "$SLOWDNS_BIN" 2>/dev/null || true
+    rm -rf "$tmpdir"
+    info "dnstt-server berhasil di-build: $SLOWDNS_BIN"
+    return 0
+}
+
+slowdns_ensure_keys() {
+    # Keypair dnstt di /etc/dnstt/server.key + server.pub.
+    mkdir -p "$SLOWDNS_DIR"
+    if [[ ! -f "$SLOWDNS_DIR/server.key" || ! -f "$SLOWDNS_DIR/server.pub" ]]; then
+        "$SLOWDNS_BIN" -gen-key -privkey-file "$SLOWDNS_DIR/server.key" -pubkey-file "$SLOWDNS_DIR/server.pub" \
+            || { error "Gagal buat keypair dnstt."; return 1; }
+        chmod 600 "$SLOWDNS_DIR/server.key" 2>/dev/null || true
+    fi
+    return 0
+}
+
+setup_sslh() {
+    # sslh multiplexer di 127.0.0.1:2222: SSH -> 127.0.0.1:22,
+    # protokol lain -> Xray VLESS TCP 127.0.0.1:10086.
+    # Matikan sslh lama dulu (bila ada) supaya port 2222 bebas.
+    systemctl stop sslh 2>/dev/null || true
+    pkill -x sslh 2>/dev/null || true
+    sleep 1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y sslh 2>/dev/null \
+        || { warn "Install sslh gagal (apt) — coba manual: apt install sslh."; return 1; }
+    cat > /etc/systemd/system/sslh.service <<EOF
+[Unit]
+Description=SSLH protocol multiplexer (vps-manager, SlowDNS)
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/sbin/sslh -f -p 127.0.0.1:$SLOWDNS_MUX_PORT --ssh=127.0.0.1:22 --anyprot=127.0.0.1:$SLOWDNS_XRAY_PORT
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable sslh 2>/dev/null || true
+    systemctl restart sslh 2>/dev/null || systemctl start sslh 2>/dev/null \
+        || { warn "sslh gagal start — cek: systemctl status sslh"; return 1; }
+    sleep 1
+    if port_tcp "$SLOWDNS_MUX_PORT"; then
+        info "sslh jalan (127.0.0.1:$SLOWDNS_MUX_PORT)."
+    else
+        warn "sslh tidak mendengarkan di $SLOWDNS_MUX_PORT — cek: systemctl status sslh"
+        return 1
+    fi
+    return 0
+}
+
+setup_slowdns() {
+    # Pasang SlowDNS lengkap: dnstt-server + kunci + service + sslh +
+    # inbound Xray VLESS TCP 10086. Domain tunnel: slow.<domain>.
+    local domain vps_ip
+    domain=$(slowdns_domain)
+    [[ -n "$domain" ]] || { error "Domain utama belum ada di state — install vps-manager dulu (mode Domain)."; return 1; }
+    vps_ip=$(state_get '.install.ip // ""' 2>/dev/null)
+    [[ -n "$vps_ip" ]] || vps_ip=$(get_public_ip)
+    [[ -n "$vps_ip" ]] || { error "IP publik VPS tidak ketahuan — cek internet."; return 1; }
+    slowdns_build_dnstt || return 1
+    slowdns_ensure_keys || return 1
+    # Service dnstt-server: UDP <IP_VPS>:53, forward ke sslh 2222.
+    cat > /etc/systemd/system/dnstt-server.service <<EOF
+[Unit]
+Description=DNSTT SlowDNS server (vps-manager)
+After=network.target
+[Service]
+Type=simple
+ExecStart=$SLOWDNS_BIN -udp $vps_ip:$SLOWDNS_UDP_PORT -privkey-file $SLOWDNS_DIR/server.key $domain 127.0.0.1:$SLOWDNS_MUX_PORT
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable dnstt-server 2>/dev/null || true
+    setup_sslh || return 1
+    # Rebuild config Xray (menambah inbound vless-slowdns 10086).
+    build_xray_config || return 1
+    systemctl restart xray 2>/dev/null || systemctl start xray 2>/dev/null || true
+    systemctl restart dnstt-server 2>/dev/null || systemctl start dnstt-server 2>/dev/null \
+        || { warn "dnstt-server gagal start — cek: systemctl status dnstt-server (port 53 mungkin dipakai layanan lain)."; return 1; }
+    sleep 1
+    if chk_slowdns; then
+        info "SlowDNS jalan (UDP $vps_ip:$SLOWDNS_UDP_PORT, domain $domain)."
+        ufw allow 53/udp 2>/dev/null || true
+    else
+        warn "SlowDNS belum jalan — cek: systemctl status dnstt-server"
+        return 1
+    fi
+    return 0
+}
+
+chk_slowdns() { svc_active dnstt-server && port_udp "$SLOWDNS_UDP_PORT"; }
+chk_sslh() { svc_active sslh && port_tcp "$SLOWDNS_MUX_PORT"; }
+
+slowdns_info() {
+    # Tampilkan info SlowDNS: domain, pubkey, record DNS yang harus ditambah.
+    local domain pubkey vps_ip
+    domain=$(slowdns_domain)
+    vps_ip=$(state_get '.install.ip // ""' 2>/dev/null)
+    pubkey=$(cat "$SLOWDNS_DIR/server.pub" 2>/dev/null || echo "(belum ada — install dulu)")
+    echo "=== SLOWDNS (DNS TUNNEL) ==="
+    echo "Domain tunnel : ${domain:-belum ada}"
+    echo "IP VPS        : ${vps_ip:-belum ketahuan}"
+    echo "Public key    : $pubkey"
+    echo ""
+    echo "Record DNS yang WAJIB ditambah di penyedia domain (Cloudflare):"
+    echo "  A   ns-slow  -> $vps_ip   (DNS Only / Gray Cloud)"
+    echo "  NS  slow     -> ns-slow.${domain#slow.}"
+    echo ""
+    echo "Klien: aplikasi SlowDNS / HTTP Custom (mode SlowDNS) dengan"
+    echo "Nameserver: $domain, Public Key di atas, akun SSH/VLESS biasa."
+    echo "Catatan: port UDP 53 harus terbuka di firewall VPS."
+}
+
+feat_install_slowdns() {
+    # Menu install SlowDNS (Features 30).
+    setup_slowdns || return 1
+    slowdns_info
 }
 
 # Dropbear SSH di 109/143 (dipakai HTTP Custom + Running Service).
@@ -4103,6 +4285,8 @@ feat_running_service() {
     svc_line "BadVPN 7200" chk_badvpn7200
     svc_line "BadVPN 7300" chk_badvpn7300
     svc_line "Dropbear $(dropbear_current_version)" chk_dropbear
+    svc_line "SlowDNS" chk_slowdns
+    svc_line "SSLH" chk_sslh
     svc_line "Haproxy" chk_haproxy
     svc_line "Crons" chk_crons
     svc_line "Nginx Webserver" chk_nginx
@@ -5144,6 +5328,7 @@ show_features_menu() {
     echo " 27.) Fixx Semua Service OFF"
     echo " 28.) Install OpenVPN WS-SSL"
     echo " 29.) Pilih Versi Dropbear (2019.78 / 2026.94)"
+    echo " 30.) Install SlowDNS (DNS Tunnel)"
     echo "  x . EXIT"
     printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
 }
@@ -5153,7 +5338,7 @@ submenu_features() {
         clear 2>/dev/null || true
         show_features_menu
         local pilih=""
-        read -r -p "Pilih dari opsi [1-29 atau x]: " pilih || return 0
+        read -r -p "Pilih dari opsi [1-30 atau x]: " pilih || return 0
         # Setiap aksi dibungkus "|| warn" supaya kegagalan kembali ke menu
         # Features, bukan keluar script (pola yang sama seperti menu_loop).
         case "$pilih" in
@@ -5186,6 +5371,7 @@ submenu_features() {
             27) feat_fix_all_services || warn "Fixx Semua Service gagal." ;;
             28) feat_install_openvpn || warn "Install OpenVPN gagal." ;;
             29) feat_choose_dropbear_version || warn "Pilih Versi Dropbear gagal." ;;
+            30) feat_install_slowdns || warn "Install SlowDNS gagal." ;;
             x|X) exit 0 ;;
             *)  error "Pilihan tidak valid: ${pilih}" ;;
         esac
