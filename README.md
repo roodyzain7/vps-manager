@@ -147,8 +147,11 @@ MENU FIXX
  10.) Fixx Haproxy             (install bila belum ada + config backend ke
                                 Xray 10001-10003 / ws-epro 10090 / Nginx 443,
                                 lalu restart; multiport seperti ARISCTUNNEL:
-                                55, 8080, 8880, 2082, 2086, 2095, 222-1000
-                                HTTP + 9444 TLS; 80/443 tetap milik Nginx)
+                                55, 8080, 8880, 2082, 2086, 2095, 222-442 +
+                                444-1000 HTTP + 9444 TLS; 80/443 tetap milik
+                                Nginx — rentang dibelah karena 443 ada di
+                                dalam 222-1000 dan dipegang Nginx, HAProxy
+                                yang coba bind 443 gagal total dan tetap OFF)
  11.) Fixx Nginx               (nginx -t, bangun ulang config bila rusak,
                                 restart, cek port 80/443)
  12.) Fixx WS ePRO             (install ulang bila belum terpasang, cek modul
@@ -192,7 +195,14 @@ SlowDNS) — script ini tidak memakai SlowDNS, jadi item itu diganti Change
 DNS Server (resolver). Item 10 Fixx Haproxy memasang HAProxy multiport
 (port 55, 8080, 8880, 2082, 2086, 2095 + rentang 222-1000, sama seperti
 HAProxy ARISCTUNNEL) dengan backend ke Xray/ws-epro/Nginx; port 80/443
-tetap dipegang Nginx, jadi link lama tidak berubah.
+tetap dipegang Nginx, jadi link lama tidak berubah. Rentang ditulis
+222-442 + 444-1000 (bukan 222-1000), karena 443 ada di dalam rentang itu
+dan dipegang Nginx — HAProxy yang mencoba bind 443 gagal start total
+("cannot bind socket", exit 1) dan tetap OFF meski Fixx Haproxy diulang
+(penyebab ini terbukti 27 Nov 2026). Bila HAProxy gagal start karena port
+lain bentrok (mis. 8080 dipegang V2Ray lama), Fixx Haproxy menampilkan
+port + pemegangnya, menanyakan izin membebaskannya, lalu mencoba lagi
+(maks. 3x); port 80/443 tidak pernah dibebaskan karena itu milik Nginx.
 
 ## Perintah non-interaktif (otomasi)
 

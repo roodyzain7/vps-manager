@@ -2890,6 +2890,10 @@ write_haproxy_conf() {
     # frontend http-in listen di port yang sama seperti HAProxy ARISCTUNNEL
     # (55, 8080, 8880, 2082, 2086, 2095 + rentang 222-1000), kecuali 80/443
     # yang tetap dipegang Nginx (link lama tetap jalan).
+    # PENTING: rentang ditulis 222-442 + 444-1000 (BUKAN 222-1000), karena
+    # 443 ada di dalam 222-1000 dan dipegang Nginx — HAProxy yang mencoba
+    # bind 443 akan gagal total ("cannot bind socket", exit 1) dan tetap OFF
+    # meski Fixx Haproxy diulang berkali-kali (terbukti di uji 27 Nov 2026).
     # backend langsung ke inbound Xray (VMess 10001, VLESS 10002, Trojan 10003)
     # dan ws-epro (SSH-WS 10090); https-in 9444 diteruskan ke Nginx :443.
     # Pola yang sama seperti menu lama v1.9.0 (terbukti jalan di VPS ini),
@@ -2915,7 +2919,8 @@ frontend http-in
     bind *:2086
     bind *:2095
     bind *:55
-    bind *:222-1000
+    bind *:222-442
+    bind *:444-1000
     mode http
     acl is_vmess path_beg /vmess
     acl is_vless path_beg /vless
@@ -2954,6 +2959,47 @@ backend xray-tls
 HAPROXYEOF
 }
 
+haproxy_fix_bind() {
+    # HAProxy gagal start karena ada port yang bentrok: baca port itu dari
+    # journal, tampilkan pemegangnya, bebaskan (tanya dulu bila interaktif),
+    # lalu coba restart lagi (maks. 3 percobaan — satu port per percobaan).
+    # Port 80/443 TIDAK PERNAH dibebaskan: itu milik Nginx, bila yang bentrok
+    # 443 berarti confignya yang salah (update script lalu ulangi Fixx Haproxy).
+    local attempt jlog port holder
+    for attempt in 1 2 3; do
+        if systemctl is-active --quiet haproxy 2>/dev/null && port_tcp 8880; then
+            info "HAProxy jalan."
+            return 0
+        fi
+        jlog=$(journalctl -u haproxy -n 30 --no-pager 2>/dev/null)
+        printf '%s\n' "$jlog" | grep -i "cannot bind" | head -n 3 >&2 || true
+        port=$(printf '%s\n' "$jlog" | grep -i "cannot bind" | head -n 1 | sed -nE 's/.*:([0-9]+)\].*/\1/p')
+        if [[ -z "$port" ]]; then
+            error "HAProxy gagal jalan tapi journal tidak menunjukkan port bentrok. Cek manual: journalctl -u haproxy -n 30"
+            return 1
+        fi
+        if [[ "$port" == "443" || "$port" == "80" ]]; then
+            error "Port ${port} bentrok dengan Nginx (port itu milik Nginx, bukan HAProxy). Config HAProxy salah — update script ke versi terbaru lalu ulangi Fixx Haproxy."
+            return 1
+        fi
+        if [[ -t 0 ]]; then
+            free_port_or_ask "$port" "HAProxy" || return 1
+        else
+            holder=$(port_holder "$port" 2>/dev/null || echo "?")
+            error "Port ${port} dipakai oleh ${holder} — bebaskan dulu, lalu jalankan Fixx Haproxy dari menu (bukan dari bot)."
+            return 1
+        fi
+        systemctl restart haproxy 2>/dev/null || true
+        sleep 2
+    done
+    if systemctl is-active --quiet haproxy 2>/dev/null && port_tcp 8880; then
+        info "HAProxy jalan."
+        return 0
+    fi
+    error "HAProxy masih gagal jalan sesudah 3 percobaan. Cek: journalctl -u haproxy -n 30"
+    return 1
+}
+
 setup_haproxy() {
     # Install HAProxy + config + nyalakan. Dipanggil dari Features 10.
     # (Menu 1 sengaja tidak memasangnya: port 80/443 sudah dipegang Nginx.)
@@ -2984,12 +3030,11 @@ setup_haproxy() {
     systemctl enable haproxy 2>/dev/null || true
     systemctl restart haproxy
     sleep 2
-    if systemctl is-active --quiet haproxy; then
-        info "HAProxy jalan (multiport: 55, 8080, 8880, 2082, 2086, 2095, 222-1000 HTTP + 9444 TLS)."
+    if systemctl is-active --quiet haproxy && port_tcp 8880; then
+        info "HAProxy jalan (multiport: 55, 8080, 8880, 2082, 2086, 2095, 222-442 + 444-1000 HTTP + 9444 TLS)."
     else
-        error "HAProxy gagal jalan:"
-        journalctl -u haproxy -n 20 --no-pager 2>/dev/null || true
-        return 1
+        haproxy_fix_bind
+        return $?
     fi
     ss -tlnp 2>/dev/null | grep -E ':8880|:9444|:8080|:2082|:55' || warn "Port HAProxy belum LISTEN."
 }
@@ -3008,15 +3053,14 @@ feat_fix_haproxy() {
     fi
     systemctl restart haproxy
     sleep 2
-    if systemctl is-active --quiet haproxy; then
+    if systemctl is-active --quiet haproxy && port_tcp 8880; then
         info "HAProxy jalan."
         echo "--- Backend (harus UP bila Xray/ws-epro/Nginx jalan) ---"
-        echo "  55, 8080, 8880, 2082, 2086, 2095, 222-1000 -> VMess 10001 / VLESS 10002 / Trojan 10003 / SSH-WS 10090"
+        echo "  55, 8080, 8880, 2082, 2086, 2095, 222-442 + 444-1000 -> VMess 10001 / VLESS 10002 / Trojan 10003 / SSH-WS 10090"
         echo "  9444 -> Nginx :443 (TLS)"
     else
-        error "HAProxy gagal jalan:"
-        journalctl -u haproxy -n 20 --no-pager 2>/dev/null || true
-        return 1
+        haproxy_fix_bind
+        return $?
     fi
     ss -tlnp 2>/dev/null | grep -E ':8880|:9444|:8080|:2082|:55' || warn "Port HAProxy belum LISTEN."
 }
