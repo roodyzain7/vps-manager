@@ -31,9 +31,14 @@ Lalu pilih menu **1) Install/Update dependensi & Xray** dan pilih mode:
 
 - **1) Domain + TLS** — butuh domain yang A record-nya sudah mengarah ke IP VPS,
   dan email untuk Let's Encrypt. Sertifikat diterbitkan otomatis via acme.sh
-  (standalone, EC-256). Nginx melayani VMess/VLESS/Trojan/SSH di **dua port**:
-  **80 non-TLS** dan **443 TLS**, dengan path tetap `/vmess`, `/vless`,
-  `/trojan`, dan `/ssh-ws` (SSH WS via jembatan ws-epro ke SSH 22).
+  (standalone, EC-256). **HAProxy memegang port 80 dan 443** (pola
+  WibuTunnel): ia mendeteksi protokol dari payload pertama koneksi —
+  `SSH-` diteruskan ke OpenSSH 22 (SSH mentah jalan di 80 & 443!),
+  path Xray diteruskan ke hub internal, sisanya ke Nginx. Nginx kini
+  hanya melayani dari localhost:18080 (tanpa TLS). VMess/VLESS/Trojan/SSH
+  tetap di **dua port**: **80 non-TLS** dan **443 TLS**, dengan path tetap
+  `/vmess`, `/vless`, `/trojan`, dan `/ssh-ws` (SSH WS via jembatan
+  ws-epro ke SSH 22).
 - **2) REALITY tanpa domain** — tidak butuh domain/sertifikat. Keypair REALITY
   dibuat otomatis (`xray x25519`). VLESS jalan di TCP 443 dengan REALITY,
   VMess tetap lewat WS port 10001 (tanpa TLS).
@@ -221,9 +226,11 @@ jadi setting-nya tampil sebagai `host:port@name` saja. Jalurnya sudah
 disiapkan script: Nginx meneruskan handshake WebSocket di root `/`
 (tanpa path) **dan** di `/ssh-ws` — di port 80 maupun 443 — ke
 jembatan ws-epro (`127.0.0.1:10090`) → SSH port 22. HTTP biasa di
-root tetap seperti semula (301 ke HTTPS di port 80, 200 OK di port
-443). `ssh` standar dari terminal tetap pakai port **22** (port
-80/443 itu WebSocket, bukan SSH mentah).
+root tetap 200 OK di kedua port. **SSH mentah kini juga jalan di
+port 80 dan 443** (HAProxy mendeteksi `SSH-` dan meneruskan ke
+OpenSSH 22), jadi `ssh -p 80 user@domain` dan `ssh -p 443 user@domain`
+bisa dipakai dari terminal — tidak hanya port 22. Cek dengan
+`vps-manager --check` (ada baris "SSH mentah port 80/443").
 
 **Bot Telegram menampilkan format yang sama.** Karena bot menjalankan
 CLI yang sama, hasil buat akun / link akun di bot juga format CEK AKUN.
@@ -310,15 +317,16 @@ Catatan jujur: item 9 di screenshot aslinya "Change Domain NS" (untuk
 SlowDNS) — script ini tidak memakai SlowDNS, jadi item itu diganti Change
 DNS Server (resolver). Item 10 Fixx Haproxy memasang HAProxy multiport
 (port 55, 8080, 8880, 2082, 2086, 2095 + rentang 222-1000, sama seperti
-HAProxy ARISCTUNNEL) dengan backend ke Xray/ws-epro/Nginx; port 80/443
-tetap dipegang Nginx, jadi link lama tidak berubah. Rentang ditulis
-222-442 + 444-1000 (bukan 222-1000), karena 443 ada di dalam rentang itu
-dan dipegang Nginx — HAProxy yang mencoba bind 443 gagal start total
-("cannot bind socket", exit 1) dan tetap OFF meski Fixx Haproxy diulang
-(penyebab ini terbukti 27 Nov 2026). Bila HAProxy gagal start karena port
-lain bentrok (mis. 8080 dipegang V2Ray lama), Fixx Haproxy menampilkan
-port + pemegangnya, menanyakan izin membebaskannya, lalu mencoba lagi
-(maks. 3x); port 80/443 tidak pernah dibebaskan karena itu milik Nginx.
+HAProxy ARISCTUNNEL) dengan backend ke Xray/ws-epro/Nginx; **sejak
+27 Nov 2026 HAProxy juga memegang port 80/443** (SSH mentah + WS,
+pola WibuTunnel) dan Nginx pindah ke localhost:18080, jadi link lama
+tidak berubah. Rentang ditulis 222-442 + 444-1000 (bukan 222-1000),
+karena 443 ada di dalam rentang itu dan kini dipegang frontend 443
+HAProxy sendiri — frontend multiport yang mencoba bind 443 akan gagal
+start total ("cannot bind socket", exit 1). Bila HAProxy gagal start
+karena port lain bentrok (mis. 8080 dipegang V2Ray lama), Fixx Haproxy
+menampilkan port + pemegangnya, menanyakan izin membebaskannya, lalu
+mencoba lagi (maks. 3x).
 
 ## Perintah non-interaktif (otomasi)
 
@@ -522,7 +530,7 @@ journalctl -u xray -n 50 --no-pager
 | Gejala | Penyebab umum & perbaikan |
 |---|---|
 | Sertifikat gagal terbit | Domain belum resolve ke IP VPS (`getent hosts domainkamu` harus = IP VPS), atau port 80 diblokir/dipakai. Perbaiki DNS, tunggu propagasi, ulangi menu 1. Log: `/tmp/acme-issue.log`. |
-| Port 80/443 bentrok | Proses lain memakai port itu (`ss -tlnp \| grep :443`). Sejak versi perbaikan 27 Nov 2026, script tidak lagi langsung gagal: ia menampilkan proses yang memegang port (mis. V2Ray/Nginx/HAProxy lama) dan menanyakan izin untuk menghentikannya sementara — layanan lama itu tetap berhenti karena Nginx baru butuh 80/443. Jawab `y` untuk lanjut, `n` untuk batal dan kembali ke menu. |
+| Port 80/443 bentrok | Proses lain memakai port itu (`ss -tlnp \| grep :443`). Sejak 27 Nov 2026 port 80/443 dipegang **HAProxy** (bukan Nginx). Saat install/update, script memindahkan Nginx lama ke port internal dulu sebelum HAProxy bind 80/443. Bila masih bentrok (mis. V2Ray lama), script menampilkan proses pemegangnya dan menanyakan izin menghentikannya sementara. Jawab `y` untuk lanjut, `n` untuk batal dan kembali ke menu. |
 | Xray tidak start | Config tidak valid — script otomatis rollback ke backup terakhir. Cek manual: `xray -test -config /usr/local/etc/xray/config.json` dan `journalctl -u xray -n 50`. Backup ada di `/etc/vps-manager/backups/`. |
 | Akun dibuat tapi tidak konek | Pastikan mode & transport cocok (WS butuh domain+TLS; REALITY butuh SNI `www.microsoft.com` & `flow=xtls-rprx-vision`). Cek akun masih `active` di `--list`, bukan `expired`. |
 | Lupa password SSH akun | Password SSH tidak disimpan di server (sengaja). Reset manual: `passwd <nama-user>` sebagai root, lalu perpanjang bila perlu. |

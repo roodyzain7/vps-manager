@@ -61,6 +61,11 @@ readonly PORT_TROJAN_GRPC=10006
 readonly PORT_SS_WS=10007
 readonly PORT_SS_GRPC=10008
 readonly PORT_XRAY_API=10085
+# Port internal setelah HAProxy mengambil alih 80/443 (WibuTunnel-style):
+# Nginx hanya melayani dari localhost; HAProxy yang menghadap internet.
+readonly NGINX_INTERNAL_PORT=18080
+readonly HAPROXY_HUB_PORT=8444
+readonly HAPROXY_PEM="/etc/haproxy/hap.pem"
 
 # Warna terminal
 readonly C_RESET='\033[0m'
@@ -699,12 +704,13 @@ reuse_acme_cert() {
     if ! "${acme_home}/acme.sh" --install-cert -d "$domain" \
             --key-file "${SSL_DIR}/private.key" \
             --fullchain-file "${SSL_DIR}/fullchain.cer" \
-            --reloadcmd "systemctl reload nginx" >/dev/null 2>&1; then
+            --reloadcmd "cat ${SSL_DIR}/fullchain.cer ${SSL_DIR}/private.key > /etc/haproxy/hap.pem 2>/dev/null; chmod 600 /etc/haproxy/hap.pem 2>/dev/null; systemctl reload nginx 2>/dev/null; systemctl reload haproxy 2>/dev/null" >/dev/null 2>&1; then
         [[ -f "$keyfile" ]] || return 1
         cp -a "$fullchain" "${SSL_DIR}/fullchain.cer"
         cp -a "$keyfile" "${SSL_DIR}/private.key"
     fi
     chmod 600 "${SSL_DIR}/private.key"
+    haproxy_sync_cert 2>/dev/null || true
     local exp
     exp=$(openssl x509 -in "${SSL_DIR}/fullchain.cer" -noout -enddate 2>/dev/null | cut -d= -f2 || echo "?")
     info "Sertifikat dipakai ulang: ${SSL_DIR}/fullchain.cer (berlaku sampai ${exp})"
@@ -733,8 +739,12 @@ issue_cert_acme() {
     fi
     "${acme_home}/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
     # Port 80 harus bebas untuk validasi standalone.
+    # (Dulu cukup stop Nginx; kini HAProxy yang memegang 80/443.)
     if systemctl is-active --quiet nginx; then
         systemctl stop nginx
+    fi
+    if systemctl is-active --quiet haproxy; then
+        systemctl stop haproxy
     fi
     if ! "${acme_home}/acme.sh" --issue -d "$domain" --standalone --keylength ec-256 >/tmp/acme-issue.log 2>&1; then
         # acme.sh mengembalikan non-zero saat "Domains not changed. Skipping"
@@ -754,8 +764,9 @@ issue_cert_acme() {
     "${acme_home}/acme.sh" --install-cert -d "$domain" \
         --key-file "${SSL_DIR}/private.key" \
         --fullchain-file "${SSL_DIR}/fullchain.cer" \
-        --reloadcmd "systemctl reload nginx" >/dev/null 2>&1
+        --reloadcmd "cat ${SSL_DIR}/fullchain.cer ${SSL_DIR}/private.key > /etc/haproxy/hap.pem 2>/dev/null; chmod 600 /etc/haproxy/hap.pem 2>/dev/null; systemctl reload nginx 2>/dev/null; systemctl reload haproxy 2>/dev/null" >/dev/null 2>&1
     chmod 600 "${SSL_DIR}/private.key"
+    haproxy_sync_cert 2>/dev/null || true
     info "Sertifikat terbit: ${SSL_DIR}/fullchain.cer (EC-256, auto-renew via acme.sh)"
 }
 
@@ -777,6 +788,7 @@ issue_cert() {
             mkdir -p "$SSL_DIR"
             ln -sf "/etc/letsencrypt/live/${domain}/fullchain.pem" "${SSL_DIR}/fullchain.cer"
             ln -sf "/etc/letsencrypt/live/${domain}/privkey.pem" "${SSL_DIR}/private.key"
+            haproxy_sync_cert 2>/dev/null || true
             info "Sertifikat terbit via certbot."
             return 0
         fi
@@ -795,6 +807,14 @@ issue_cert() {
 # menjelaskan batasannya.
 # -----------------------------------------------------------------------------
 write_nginx_conf() {
+    # Nginx TIDAK lagi memegang 80/443 — HAProxy yang menghadap internet
+    # (terminasi TLS + deteksi SSH mentah). Nginx hanya satu server HTTP di
+    # localhost:18080, melayani yang diteruskan HAProxy:
+    # WS (/vmess, /vless, /trojan, /ss), SSH-WS (/ssh-ws dan root "/" tanpa
+    # path), /vps-manager.sh, ACME challenge, dan root 200 OK.
+    # gRPC TIDAK lagi di Nginx: HAProxy hub yang meneruskannya langsung ke
+    # Xray (proto h2) — Nginx menerima HTTP/1.1 dari HAProxy sehingga
+    # grpc_pass di sini tidak akan jalan.
     local domain="$1"
     local vmess_path vless_path trojan_path
     vmess_path=$(state_get '.install.ws_paths.vmess')
@@ -802,14 +822,13 @@ write_nginx_conf() {
     trojan_path=$(state_get '.install.ws_paths.trojan')
 
     cat > "$NGINX_CONF" <<EOF
-# vps-manager — Nginx reverse proxy (dibuat otomatis, jangan edit manual).
+# vps-manager — Nginx internal (dibuat otomatis, jangan edit manual).
 # Domain: ${domain}
+# Hanya listen di localhost:${NGINX_INTERNAL_PORT}; port 80/443 dipegang HAProxy.
 
 server {
-    listen 80;
+    listen 127.0.0.1:${NGINX_INTERNAL_PORT};
     server_name ${domain};
-    # Port 80 = non-TLS: VMess/VLESS/Trojan WS + SSH WS tanpa TLS.
-    # (ACME challenge tetap bisa diakses; selain path di bawah, redirect ke HTTPS.)
     location /.well-known/acme-challenge/ { root /var/www/html; }
     location ${vmess_path} {
         proxy_pass http://127.0.0.1:${PORT_VMESS_WS};
@@ -840,78 +859,6 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
     }
-    location /ssh-ws {
-        proxy_pass http://127.0.0.1:10090;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-    }
-    # SSH WS tanpa path (HTTP Custom tanpa path): handshake WebSocket di
-    # root "/" diteruskan ke ws-epro; bukan WebSocket -> tetap redirect HTTPS.
-    # "rewrite ... last" di dalam "if" adalah pola aman menurut dokumentasi Nginx.
-    location / {
-        if (\$http_upgrade ~* "websocket") {
-            rewrite ^ /__ssh_ws_root last;
-        }
-        return 301 https://\$host\$request_uri;
-    }
-    location /__ssh_ws_root {
-        internal;
-        proxy_pass http://127.0.0.1:10090;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-    }
-}
-
-server {
-    # "http2 on;" hanya ada di Nginx >= 1.25.1 — di Ubuntu 22.04 (Nginx 1.18)
-    # direktif itu tidak dikenal dan "nginx -t" gagal. Bentuk "listen ... http2"
-    # ini jalan di semua versi Nginx sejak 1.9.5.
-    # (Jangan pakai backtick di komentar dalam heredoc ini: heredoc tidak
-    # dikutip sehingga backtick akan dieksekusi sebagai perintah.)
-    listen 443 ssl http2;
-    server_name ${domain};
-
-    ssl_certificate ${SSL_DIR}/fullchain.cer;
-    ssl_certificate_key ${SSL_DIR}/private.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers off;
-
-    # VMess WS
-    location ${vmess_path} {
-        proxy_pass http://127.0.0.1:${PORT_VMESS_WS};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-    }
-    # VLESS WS
-    location ${vless_path} {
-        proxy_pass http://127.0.0.1:${PORT_VLESS_WS};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-    }
-    # Trojan WS
-    location ${trojan_path} {
-        proxy_pass http://127.0.0.1:${PORT_TROJAN_WS};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-    }
-    # Shadowsocks WS
-    location /ss {
-        proxy_pass http://127.0.0.1:${PORT_SS_WS};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-    }
     # SSH over WebSocket via jembatan ws-epro (127.0.0.1:10090 -> SSH 22).
     # JANGAN proxy langsung ke 127.0.0.1:22: Nginx tidak menerjemahkan frame
     # WebSocket menjadi TCP mentah, jadi klien SSH/HTTP Custom tidak akan connect.
@@ -921,20 +868,6 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
-    }
-
-    # gRPC (VLESS/VMess/Trojan/Shadowsocks) — serviceName = path; butuh HTTP/2 (sudah aktif di 443).
-    location /vless-grpc {
-        grpc_pass grpc://127.0.0.1:${PORT_VLESS_GRPC};
-    }
-    location /vmess-grpc {
-        grpc_pass grpc://127.0.0.1:${PORT_VMESS_GRPC};
-    }
-    location /trojan-grpc {
-        grpc_pass grpc://127.0.0.1:${PORT_TROJAN_GRPC};
-    }
-    location /ss-grpc {
-        grpc_pass grpc://127.0.0.1:${PORT_SS_GRPC};
     }
 
     # Link PERMANEN script ini (permintaan user — tidak ada expired):
@@ -950,6 +883,7 @@ server {
 
     # SSH WS tanpa path (HTTP Custom tanpa path): handshake WebSocket di
     # root "/" diteruskan ke ws-epro; bukan WebSocket -> tetap 200 OK.
+    # "rewrite ... last" di dalam "if" adalah pola aman menurut dokumentasi Nginx.
     location / {
         if (\$http_upgrade ~* "websocket") {
             rewrite ^ /__ssh_ws_root last;
@@ -1002,7 +936,7 @@ install_self() {
     if [[ "$(readlink -f "$0" 2>/dev/null || echo "$0")" != "$(readlink -f "$INSTALL_BIN" 2>/dev/null || echo "$INSTALL_BIN")" ]]; then
         cp -a "$0" "$INSTALL_BIN" 2>/dev/null || cp -a "$(readlink -f "$0")" "$INSTALL_BIN"
     fi
-    chmod +x "$INSTALL_BIN"
+    chmod 755 "$INSTALL_BIN"
     # Pintasan `menu`: sekali terinstall, cukup ketik `menu` di terminal untuk
     # membuka menu dengan hasil instalasi yang sudah ada (permintaan user).
     # Hanya dibuat bila belum ada, atau bila sudah menunjuk ke script ini —
@@ -1665,6 +1599,10 @@ do_install() {
             systemctl start nginx 2>/dev/null || systemctl reload nginx
             # Jembatan SSH WS (wajib supaya /ssh-ws di port 80 & 443 benar-benar jalan).
             setup_ws_epro || true
+            # HAProxy ambil alih 80/443 (SSH mentah + WS sama-sama jalan).
+            # Harus sesudah Nginx pindah ke port internal (write_nginx_conf di
+            # atas) supaya 80/443 sudah bebas saat HAProxy bind.
+            setup_haproxy || warn "HAProxy gagal dipasang — 80/443 belum pindah (coba menu 12 -> 10 Fixx Haproxy)."
             if ((${#STOPPED_SERVICES[@]} > 0)); then
                 warn "Layanan lama berikut TETAP berhenti (portnya kini dipakai Nginx baru): ${STOPPED_SERVICES[*]}."
                 warn "Itu sengaja — instalasi VPN lama tidak dihapus, hanya dimatikan supaya tidak bentrok."
@@ -3350,9 +3288,9 @@ chk_badvpn7100() { port_udp 7100; }
 chk_badvpn7200() { port_udp 7200; }
 chk_badvpn7300() { port_udp 7300; }
 chk_dropbear() { svc_active dropbear && { port_tcp 109 || port_tcp 143; }; }
-chk_haproxy() { port_tcp 8880; }
+chk_haproxy() { port_tcp 8880 && port_tcp 80; }
 chk_crons() { svc_active cron crond; }
-chk_nginx() { svc_active nginx && port_tcp 443; }
+chk_nginx() { svc_active nginx && port_tcp "$NGINX_INTERNAL_PORT"; }
 chk_xray_vmess_tls() { svc_active xray && xray_inbound vmess ws && port_tcp 443; }
 chk_xray_vmess_nontls() { svc_active xray && xray_inbound vmess ws && port_tcp 80; }
 chk_xray_vmess_grpc() { svc_active xray && xray_inbound vmess grpc; }
@@ -3567,6 +3505,8 @@ feat_change_domain() {
         return 1
     fi
     apply_xray || { error "Xray gagal start dengan domain baru."; show_xray_failure; return 1; }
+    haproxy_sync_cert 2>/dev/null || true
+    systemctl restart haproxy 2>/dev/null || true
     systemctl restart ws-epro 2>/dev/null || true
     info "Domain diganti ke $new_domain."
 }
@@ -3593,22 +3533,42 @@ feat_change_dns() {
     info "DNS diganti. Tes resolve: $(getent hosts archive.ubuntu.com | head -n 1 || echo GAGAL)"
 }
 
+haproxy_sync_cert() {
+    # Gabung fullchain + private key jadi satu .pem untuk HAProxy (terminasi
+    # TLS di port 443). Dipanggil sesudah sertifikat terbit/dipakai-ulang dan
+    # sebelum HAProxy start/reload. Return 1 bila belum ada sertifikat
+    # (mode REALITY) — pemanggil yang memutuskan apa yang dilakukan.
+    local fullchain="${SSL_DIR}/fullchain.cer"
+    local keyfile="${SSL_DIR}/private.key"
+    [[ -f "$fullchain" && -f "$keyfile" ]] || return 1
+    mkdir -p /etc/haproxy
+    cat "$fullchain" "$keyfile" > "$HAPROXY_PEM" 2>/dev/null || return 1
+    chmod 600 "$HAPROXY_PEM"
+    chown root:root "$HAPROXY_PEM" 2>/dev/null || true
+    return 0
+}
+
 write_haproxy_conf() {
-    # Config HAProxy multiport untuk stack vps-manager saat ini:
-    # frontend http-in listen di port yang sama seperti HAProxy ARISCTUNNEL
-    # (55, 8080, 8880, 2082, 2086, 2095 + rentang 222-1000), kecuali 80/443
-    # yang tetap dipegang Nginx (link lama tetap jalan).
-    # PENTING: rentang ditulis 222-442 + 444-1000 (BUKAN 222-1000), karena
-    # 443 ada di dalam 222-1000 dan dipegang Nginx — HAProxy yang mencoba
-    # bind 443 akan gagal total ("cannot bind socket", exit 1) dan tetap OFF
-    # meski Fixx Haproxy diulang berkali-kali (terbukti di uji 27 Nov 2026).
-    # backend langsung ke inbound Xray (VMess 10001, VLESS 10002, Trojan 10003)
-    # dan ws-epro (SSH-WS 10090); https-in 9444 diteruskan ke Nginx :443.
-    # Pola yang sama seperti menu lama v1.9.0 (terbukti jalan di VPS ini),
-    # hanya port backend yang disesuaikan dengan vps-manager.
+    # Config HAProxy: ambil alih 80/443 dari Nginx (mode domain + sertifikat).
+    # Pola deteksi protokol (SSH mentah vs HTTP/WebSocket) mengikuti cara
+    # WibuTunnel: inspect payload pertama koneksi.
+    # - Port 80 (TCP): payload "SSH-" -> OpenSSH 22; path Xray WS -> hub;
+    #   sisanya -> Nginx internal (SSH-WS root//ssh-ws, /vps-manager.sh, root).
+    # - Port 443 + 9444 (TCP, terminasi TLS): setelah dekripsi, "SSH-" ->
+    #   OpenSSH 22; ALPN h2 (gRPC) atau path Xray -> hub; sisanya -> Nginx.
+    # - Hub (127.0.0.1:8444, HTTP): route WS + gRPC ke inbound Xray.
+    # - Multiport lama (8880, 8080, 2082, 2086, 2095, 55, 222-442 + 444-1000)
+    #   tetap jalan seperti sebelumnya.
+    # - Mode REALITY (tanpa sertifikat): frontend 443/9444 dilewati, Xray
+    #   REALITY tetap memegang 443; port 80 tetap dideteksi SSH-nya.
+    # TIDAK pakai PROXY protocol (send-proxy-v2): Xray vps-manager tidak
+    # mengaktifkan acceptProxyProtocol dan Nginx tidak mengirimnya — kalau
+    # diaktifkan, rantai Nginx/Xray rusak. Xray melihat IP HAProxy (127.0.0.1).
     mkdir -p /etc/haproxy
     [[ -f /etc/haproxy/haproxy.cfg ]] && cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak.$(date '+%Y%m%d-%H%M') 2>/dev/null || true
-    cat > /etc/haproxy/haproxy.cfg <<'HAPROXYEOF'
+    local has_tls=0
+    [[ -f "$HAPROXY_PEM" ]] && has_tls=1
+    cat > /etc/haproxy/haproxy.cfg <<HAPROXYEOF
 global
     log /dev/log local0
     maxconn 1024
@@ -3625,6 +3585,119 @@ defaults
     timeout connect 5s
     timeout client 30s
     timeout server 30s
+    timeout tunnel 1h
+
+frontend port80
+    bind *:80
+    mode tcp
+    timeout client 30m
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req.payload(0,4) -m str SSH- }
+    tcp-request content accept if HTTP
+    acl is_raw_ssh req.payload(0,4) -m str SSH-
+    acl is_sshws path_beg /ssh-ws
+    acl is_xray path_beg /vmess /vless /trojan /ss
+    acl is_xray path_beg %2Fvmess %2Fvless %2Ftrojan %2Fss
+    use_backend ssh_raw if is_raw_ssh
+    use_backend nginx_internal if is_sshws
+    use_backend bk_hub if is_xray
+    default_backend nginx_internal
+
+HAPROXYEOF
+    if (( has_tls )); then
+        cat >> /etc/haproxy/haproxy.cfg <<HAPROXYEOF
+frontend port443
+    bind *:443 ssl crt ${HAPROXY_PEM} alpn h2,http/1.1
+    bind *:9444 ssl crt ${HAPROXY_PEM} alpn h2,http/1.1
+    mode tcp
+    timeout client 30m
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req.payload(0,4) -m str SSH- }
+    tcp-request content accept if HTTP
+    acl is_raw_ssh req.payload(0,4) -m str SSH-
+    acl is_h2 ssl_fc_alpn -i h2
+    acl is_sshws path_beg /ssh-ws
+    acl is_xray path_beg /vmess /vless /trojan /ss
+    acl is_xray path_beg %2Fvmess %2Fvless %2Ftrojan %2Fss
+    use_backend ssh_raw if is_raw_ssh
+    use_backend nginx_internal if is_sshws
+    use_backend bk_hub if is_h2
+    use_backend bk_hub if is_xray
+    default_backend nginx_internal
+
+HAPROXYEOF
+    fi
+    cat >> /etc/haproxy/haproxy.cfg <<HAPROXYEOF
+backend ssh_raw
+    mode tcp
+    timeout server 30m
+    server openssh 127.0.0.1:22 check inter 5s fall 3 rise 2
+
+# Backend perantara ke hub (TCP murni — meneruskan byte mentah ke listen
+# hub_xray di 127.0.0.1:8444; hub yang mengurai HTTP/HTTP-2 dan route by path).
+# JANGAN use_backend langsung ke listen: HAProxy mengembalikan 503
+# "No server is available" untuk route itu (terbukti di uji 27 Nov 2026).
+backend bk_hub
+    mode tcp
+    server hub 127.0.0.1:${HAPROXY_HUB_PORT} check inter 5s fall 3 rise 2
+
+listen hub_xray
+    bind 127.0.0.1:${HAPROXY_HUB_PORT}
+    mode http
+    option forwardfor
+    acl is_vmess_ws path_beg /vmess
+    acl is_vless_ws path_beg /vless
+    acl is_trojan_ws path_beg /trojan
+    acl is_ss_ws path /ss
+    acl is_vmess_grpc path_beg /vmess-grpc
+    acl is_vless_grpc path_beg /vless-grpc
+    acl is_trojan_grpc path_beg /trojan-grpc
+    acl is_ss_grpc path_beg /ss-grpc
+    use_backend xray_vmess_grpc if is_vmess_grpc
+    use_backend xray_vless_grpc if is_vless_grpc
+    use_backend xray_trojan_grpc if is_trojan_grpc
+    use_backend xray_ss_grpc if is_ss_grpc
+    use_backend xray_vmess if is_vmess_ws
+    use_backend xray_vless if is_vless_ws
+    use_backend xray_trojan if is_trojan_ws
+    use_backend xray_ss if is_ss_ws
+    default_backend nginx_internal
+
+backend xray_vmess
+    mode http
+    server vmess 127.0.0.1:10001 check inter 5s fall 3 rise 2
+
+backend xray_vless
+    mode http
+    server vless 127.0.0.1:10002 check inter 5s fall 3 rise 2
+
+backend xray_trojan
+    mode http
+    server trojan 127.0.0.1:10003 check inter 5s fall 3 rise 2
+
+backend xray_ss
+    mode http
+    server ss 127.0.0.1:10007 check inter 5s fall 3 rise 2
+
+backend xray_vmess_grpc
+    mode http
+    server vmess_grpc 127.0.0.1:10005 proto h2 check inter 5s fall 3 rise 2
+
+backend xray_vless_grpc
+    mode http
+    server vless_grpc 127.0.0.1:10004 proto h2 check inter 5s fall 3 rise 2
+
+backend xray_trojan_grpc
+    mode http
+    server trojan_grpc 127.0.0.1:10006 proto h2 check inter 5s fall 3 rise 2
+
+backend xray_ss_grpc
+    mode http
+    server ss_grpc 127.0.0.1:10008 proto h2 check inter 5s fall 3 rise 2
+
+backend nginx_internal
+    mode http
+    server nginx 127.0.0.1:${NGINX_INTERNAL_PORT} check inter 5s fall 3 rise 2
 
 frontend http-in
     bind *:8880
@@ -3661,15 +3734,6 @@ backend v2ray-trojan
 backend ws-epro
     mode http
     server wsepro 127.0.0.1:10090 check inter 5s fall 3 rise 2
-
-frontend https-in
-    bind *:9444
-    mode tcp
-    default_backend xray-tls
-
-backend xray-tls
-    mode tcp
-    server xray 127.0.0.1:443 check inter 5s fall 3 rise 2
 HAPROXYEOF
 }
 
@@ -3778,8 +3842,8 @@ haproxy_fix_bind() {
 }
 
 setup_haproxy() {
-    # Install HAProxy + config + nyalakan. Dipanggil dari Features 10.
-    # (Menu 1 sengaja tidak memasangnya: port 80/443 sudah dipegang Nginx.)
+    # Install HAProxy + config + nyalakan. Dipanggil dari menu 1 (mode domain)
+    # dan Features 10. HAProxy kini memegang 80/443 (SSH mentah + WS).
     if ! command -v haproxy >/dev/null 2>&1; then
         info "Menginstall HAProxy..."
         fix_dns
@@ -3789,6 +3853,22 @@ setup_haproxy() {
             return 1
         fi
     fi
+    # Pastikan Nginx sudah pindah ke port internal (lepas 80/443). Bila config
+    # Nginx masih listen 80/443 (install lama), tulis ulang + reload dulu —
+    # kalau tidak, HAProxy gagal bind 80/443 ("cannot bind socket").
+    local domain
+    domain=$(state_get '.install.domain // ""')
+    if [[ -n "$domain" ]] && grep -qE 'listen[[:space:]]+(80|443)([[:space:]]|;)' "$NGINX_CONF" 2>/dev/null; then
+        warn "Nginx masih memegang 80/443 — memindahkan ke port internal ${NGINX_INTERNAL_PORT}..."
+        backup_config
+        write_nginx_conf "$domain" || return 1
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx
+        sleep 1
+    fi
+    # Sertifikat .pem untuk terminasi TLS 443 (mode domain saja; REALITY tak ada cert).
+    if ! haproxy_sync_cert; then
+        warn "Belum ada sertifikat untuk HAProxy (mode REALITY?) — frontend 443/9444 dilewati, Xray REALITY tetap memegang 443."
+    fi
     write_haproxy_conf
     haproxy_apply_limits
     if ! haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5; then
@@ -3796,6 +3876,8 @@ setup_haproxy() {
         return 1
     fi
     if command -v ufw >/dev/null 2>&1; then
+        ufw allow 80/tcp 2>/dev/null || true
+        ufw allow 443/tcp 2>/dev/null || true
         ufw allow 8880/tcp 2>/dev/null || true
         ufw allow 9444/tcp 2>/dev/null || true
         ufw allow 8080/tcp 2>/dev/null || true
@@ -3809,13 +3891,13 @@ setup_haproxy() {
     systemctl restart haproxy
     sleep 2
     if haproxy_is_up; then
-        info "HAProxy jalan (multiport: 55, 8080, 8880, 2082, 2086, 2095, 222-442 + 444-1000 HTTP + 9444 TLS)."
+        info "HAProxy jalan (80/443: SSH mentah + WS; multiport: 55, 8080, 8880, 2082, 2086, 2095, 222-442 + 444-1000 HTTP + 9444 TLS)."
     else
         haproxy_status_diag
         haproxy_fix_bind
         return $?
     fi
-    ss -tlnp 2>/dev/null | grep -E ':8880|:9444|:8080|:2082|:55' || warn "Port HAProxy belum LISTEN."
+    ss -tlnp 2>/dev/null | grep -E ':80 |:443 |:8880|:9444|:8080|:2082|:55' || warn "Port HAProxy belum LISTEN."
 }
 
 feat_fix_haproxy() {
@@ -3825,6 +3907,7 @@ feat_fix_haproxy() {
         setup_haproxy
         return $?
     fi
+    haproxy_sync_cert 2>/dev/null || true
     if ! haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5; then
         warn "Config HAProxy rusak — menulis ulang dari template vps-manager..."
         write_haproxy_conf
@@ -3873,7 +3956,8 @@ feat_fix_nginx() {
     systemctl restart nginx
     sleep 1
     if systemctl is-active --quiet nginx; then info "Nginx jalan."; else error "Nginx gagal jalan — cek: journalctl -u nginx -n 30"; fi
-    ss -tlnp 2>/dev/null | grep -E ':80 |:443 ' || warn "Port 80/443 belum LISTEN."
+    ss -tlnp 2>/dev/null | grep -E ":${NGINX_INTERNAL_PORT} " || warn "Port internal Nginx ${NGINX_INTERNAL_PORT} belum LISTEN (80/443 kini dipegang HAProxy, bukan Nginx)."
+    systemctl reload haproxy 2>/dev/null || true
 }
 
 feat_fix_ws_epro() {
@@ -3948,6 +4032,8 @@ feat_fix_domain() {
     sleep 2
     systemctl restart ws-epro 2>/dev/null || true
     systemctl restart nginx 2>/dev/null || true
+    haproxy_sync_cert 2>/dev/null || true
+    systemctl restart haproxy 2>/dev/null || true
     info "Domain diperbaiki: $domain (IP $vps_ip)."
     feat_running_service
 }
@@ -4000,7 +4086,7 @@ feat_clear_cache_file() {
 feat_info_ports() {
     echo "=== Info Service Port ==="
     echo "Port layanan vps-manager (yang seharusnya LISTEN):"
-    echo "  SSH 22 | Nginx 80, 443 | Xray 10001-10004, 10085 | ws-epro 10090"
+    echo "  SSH 22 | HAProxy 80, 443 | Nginx internal ${NGINX_INTERNAL_PORT} | Xray 10001-10008, 10085 | ws-epro 10090 | Hub ${HAPROXY_HUB_PORT}"
     echo
     ss -tlnp 2>/dev/null
 }
@@ -4407,6 +4493,29 @@ menu_loop() {
 #   000 = Nginx/TLS mati atau port 443 tidak bisa dijangkau
 # Selalu return 0 (hanya laporan, tidak menggagalkan install).
 # -----------------------------------------------------------------------------
+ssh_raw_check() {
+    # Uji SSH mentah lewat HAProxy: kirim banner klien "SSH-2.0-...", baca
+    # banner server. Return 0 bila banner "SSH-" diterima (HAProxy mendeteksi
+    # payload dan meneruskan ke OpenSSH 22).
+    # Port 443/9444 adalah TLS: bungkus dulu dengan openssl s_client, lalu
+    # kirim banner SSH di dalam channel terenkripsi.
+    local port="$1"
+    local resp=""
+    if [[ "$port" == "443" || "$port" == "9444" ]]; then
+        command -v openssl >/dev/null 2>&1 || return 1
+        local dom
+        dom=$(state_get '.install.domain // "localhost"')
+        resp=$( (printf 'SSH-2.0-vps-manager-check\r\n'; sleep 1) | timeout 6 openssl s_client -connect 127.0.0.1:"$port" -servername "$dom" -quiet 2>/dev/null | head -c 40 || true )
+        [[ "$resp" == SSH-* ]]
+        return $?
+    fi
+    exec 3<>/dev/tcp/127.0.0.1/"$port" 2>/dev/null || return 1
+    printf 'SSH-2.0-vps-manager-check\r\n' >&3
+    IFS= read -r -t 5 resp <&3 || true
+    exec 3<&- 3>&- 2>/dev/null || true
+    [[ "$resp" == SSH-* ]]
+}
+
 do_check() {
     echo "=== Cek rantai koneksi (vps-manager --check) ==="
     local mode domain ok=1
@@ -4418,11 +4527,35 @@ do_check() {
         error "Nginx: TIDAK berjalan — coba: systemctl start nginx"
         ok=0
     fi
+    if systemctl is-active --quiet haproxy 2>/dev/null; then
+        info "HAProxy: berjalan (memegang 80/443)"
+    else
+        error "HAProxy: TIDAK berjalan — SSH mentah + WS di 80/443 tidak jalan (coba menu 12 -> 10)"
+        ok=0
+    fi
     if port_tcp 443; then
-        info "Port 443: LISTEN"
+        info "Port 443 (HAProxy): LISTEN"
     else
         error "Port 443: tidak ada yang mendengarkan"
         ok=0
+    fi
+    if port_tcp 80; then
+        info "Port 80 (HAProxy): LISTEN"
+    else
+        error "Port 80: tidak ada yang mendengarkan"
+        ok=0
+    fi
+    if ssh_raw_check 80; then
+        info "SSH mentah port 80: OK (banner SSH diterima — ssh -p 80 jalan)"
+    else
+        warn "SSH mentah port 80: belum terdeteksi (kirim banner SSH, baca balasan)"
+    fi
+    if [[ "$mode" == "domain" ]]; then
+        if ssh_raw_check 443; then
+            info "SSH mentah port 443: OK (banner SSH diterima — ssh via TLS/SNI jalan)"
+        else
+            warn "SSH mentah port 443: belum terdeteksi (uji manual: ssh -p 443)"
+        fi
     fi
     if systemctl is-active --quiet xray 2>/dev/null; then
         info "Xray: berjalan"
@@ -4454,9 +4587,9 @@ do_check() {
         code=$(curl -sk --max-time 8 --resolve "${domain}:443:127.0.0.1" "https://${domain}/" -o /dev/null -w "%{http_code}" 2>/dev/null || true)
         code=${code:-000}
         if [[ "$code" == "200" ]]; then
-            info "HTTPS ${domain}/ : 200 (Nginx + TLS OK)"
+            info "HTTPS ${domain}/ : 200 (HAProxy + TLS OK)"
         else
-            error "HTTPS ${domain}/ : ${code} (Nginx/TLS bermasalah)"
+            error "HTTPS ${domain}/ : ${code} (HAProxy/TLS bermasalah)"
             ok=0
         fi
         code=$(curl -sk --http1.1 --max-time 5 --resolve "${domain}:443:127.0.0.1" "https://${domain}${vp}" \
@@ -4465,11 +4598,11 @@ do_check() {
             -o /dev/null -w "%{http_code}" 2>/dev/null || true)
         code=${code:-000}
         case "$code" in
-            101) info "WS ${vp} : 101 (NORMAL — WebSocket handshake berhasil, Nginx -> Xray jalan)" ;;
-            400) info "WS ${vp} : 400 (NORMAL — Nginx terus ke Xray, tinggal handshake VMess klien)" ;;
-            200) error "WS ${vp} : 200 — path TIDAK dikenali Nginx, link klien pakai path lama! Ambil link baru dari menu 9."; ok=0 ;;
-            502) error "WS ${vp} : 502 — Nginx hidup tapi Xray tidak menjawab (cek: systemctl status xray)"; ok=0 ;;
-            *)   error "WS ${vp} : ${code} — rantai putus di Nginx/Xray"; ok=0 ;;
+            101) info "WS ${vp} : 101 (NORMAL — WebSocket handshake berhasil, HAProxy -> hub Xray jalan)" ;;
+            400) info "WS ${vp} : 400 (NORMAL — HAProxy terus ke Xray, tinggal handshake VMess klien)" ;;
+            200) error "WS ${vp} : 200 — path TIDAK dikenali HAProxy, link klien pakai path lama! Ambil link baru dari menu 9."; ok=0 ;;
+            502) error "WS ${vp} : 502 — HAProxy hidup tapi Xray tidak menjawab (cek: systemctl status xray)"; ok=0 ;;
+            *)   error "WS ${vp} : ${code} — rantai putus di HAProxy/Xray"; ok=0 ;;
         esac
         # Link permanen script harus bisa diunduh (200).
         code=$(curl -sk --max-time 8 --resolve "${domain}:443:127.0.0.1" "https://${domain}/vps-manager.sh" -o /dev/null -w "%{http_code}" 2>/dev/null || true)
@@ -4477,7 +4610,7 @@ do_check() {
         if [[ "$code" == "200" ]]; then
             info "Link permanen https://${domain}/vps-manager.sh : 200 (bisa diunduh, tidak expired)"
         else
-            warn "Link permanen https://${domain}/vps-manager.sh : ${code} (cek Nginx location /vps-manager.sh)"
+            warn "Link permanen https://${domain}/vps-manager.sh : ${code} (cek HAProxy -> Nginx location /vps-manager.sh)"
         fi
         # Uji yang sama di port 80 non-TLS.
         code=$(curl -s --max-time 5 --resolve "${domain}:80:127.0.0.1" "http://${domain}${vp}" \
@@ -4489,8 +4622,8 @@ do_check() {
             101) info "WS non-TLS ${vp} (port 80) : 101 (NORMAL — WebSocket handshake berhasil)" ;;
             400) info "WS non-TLS ${vp} (port 80) : 400 (NORMAL)" ;;
             200) error "WS non-TLS ${vp} (port 80) : 200 — path tidak dikenali di port 80"; ok=0 ;;
-            502) error "WS non-TLS ${vp} (port 80) : 502 — Nginx hidup tapi Xray tidak menjawab"; ok=0 ;;
-            *)   error "WS non-TLS ${vp} (port 80) : ${code} — cek Nginx port 80"; ok=0 ;;
+            502) error "WS non-TLS ${vp} (port 80) : 502 — HAProxy hidup tapi Xray tidak menjawab"; ok=0 ;;
+            *)   error "WS non-TLS ${vp} (port 80) : ${code} — cek HAProxy port 80"; ok=0 ;;
         esac
     elif [[ "$mode" == "reality" ]]; then
         if port_tcp 443; then
