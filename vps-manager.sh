@@ -2023,6 +2023,15 @@ def handle_message(token, admin_id, sessions, msg):
 
 def main():
     token, admin_id = load_conf()
+    # Validasi token di awal supaya penyebab "bot diam" langsung ketahuan
+    # di log: username bot (cek kamu chat ke bot yang benar) atau 401.
+    me = api(token, "getMe", timeout=15)
+    if me:
+        logging.info("bot jalan sebagai @%s (id %s), admin chat %s",
+                     me.get("username"), me.get("id"), admin_id)
+    else:
+        logging.warning("getMe gagal — token mungkin salah atau jaringan "
+                        "bermasalah; tetap mencoba polling.")
     logging.info("bot jalan (admin chat %s)", admin_id)
     sessions = {}
     offset = None
@@ -2080,6 +2089,116 @@ bot_status() {
     if systemctl is-active --quiet vps-bot 2>/dev/null; then echo "ON"; else echo "OFF"; fi
 }
 
+
+# -----------------------------------------------------------------------------
+# Diagnosa Bot Telegram (menu 11 > 05, atau: vps-manager --bot-check).
+# Penyebab "bot tidak ada respon" yang paling sering, berurutan:
+#   1. token salah / sudah diganti (getMe -> 401),
+#   2. VPS tidak bisa mencapai api.telegram.org (DNS/internet),
+#   3. chat dari akun/chat ID yang berbeda dari ADMIN_CHAT_ID,
+#   4. belum /start ke bot yang benar, atau bot diblokir (sendMessage -> 403),
+#   5. service crash-loop (config tidak valid).
+# Token TIDAK pernah ditampilkan utuh (hanya 6 karakter awal + 4 akhir).
+# -----------------------------------------------------------------------------
+bot_check() {
+    echo "=== Diagnosa Bot Telegram ==="
+    echo "--- 1. Service vps-bot ---"
+    local st
+    st=$(systemctl is-active vps-bot 2>/dev/null || true)
+    if systemctl is-active --quiet vps-bot 2>/dev/null; then
+        info "Service vps-bot AKTIF."
+    else
+        warn "Service vps-bot TIDAK aktif (status: $st)."
+    fi
+    echo "  Log 15 baris terakhir (journalctl -u vps-bot):"
+    journalctl -u vps-bot -n 15 --no-pager 2>/dev/null | sed 's/^/  /' || echo "  (tidak ada log)"
+    echo "--- 2. Config ${BOT_CONF} ---"
+    if [[ ! -f "$BOT_CONF" ]]; then
+        error "bot.conf tidak ada — install dulu (menu 11 > 01)."
+        return 0
+    fi
+    local token admin
+    token=$(grep '^BOT_TOKEN=' "$BOT_CONF" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
+    admin=$(grep '^ADMIN_CHAT_ID=' "$BOT_CONF" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
+    if [[ -z "$token" ]]; then
+        error "BOT_TOKEN kosong di bot.conf — install ulang (menu 11 > 01)."
+        return 0
+    fi
+    if [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]]; then
+        info "Format token OK: ${token:0:6}...${token: -4}"
+    else
+        error "Format token ANEH: ${token:0:6}... (harusnya angka:huruf-panjang) — ambil token baru dari @BotFather."
+    fi
+    if [[ "$admin" =~ ^[0-9]+$ ]]; then
+        info "ADMIN_CHAT_ID: $admin"
+    else
+        error "ADMIN_CHAT_ID tidak valid ('$admin') — harus angka dari @userinfobot. Install ulang (menu 11 > 01)."
+        return 0
+    fi
+    echo "--- 3. Token dicek ke Telegram (getMe) ---"
+    local resp code body username botid
+    resp=$(curl -s --max-time 15 -w "\n%{http_code}" "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || printf '\n000')
+    code=$(printf '%s' "$resp" | tail -n 1)
+    body=$(printf '%s' "$resp" | sed '$d')
+    if [[ "$code" == "200" ]]; then
+        username=$(printf '%s' "$body" | jq -r '.result.username // ""' 2>/dev/null)
+        botid=$(printf '%s' "$body" | jq -r '.result.id // ""' 2>/dev/null)
+        info "Token VALID — bot: @${username:-?} (id ${botid:-?})."
+        echo "  Pastikan kamu chat ke bot @$username ini (bukan bot lain), lalu kirim /start."
+    elif [[ "$code" == "401" ]]; then
+        error "TOKEN SALAH (401 Unauthorized) — token ini ditolak Telegram."
+        echo "  Ambil token baru: chat @BotFather > /mybots > pilih bot > API Token."
+        echo "  Lalu install ulang: menu 11 > 01 (isi token baru + chat ID yang sama)."
+        return 0
+    elif [[ "$code" == "000" ]]; then
+        error "VPS TIDAK BISA mencapai api.telegram.org (koneksi gagal/timeout)."
+        echo "  Cek internet/DNS VPS: Features 9 (ganti DNS ke 1.1.1.1) lalu ulangi diagnosa."
+        return 0
+    else
+        error "getMe gagal (HTTP $code): $body"
+        return 0
+    fi
+    echo "--- 4. Pesan masuk terakhir (getUpdates) ---"
+    local upd n last_chat last_text
+    upd=$(curl -s --max-time 15 "https://api.telegram.org/bot${token}/getUpdates?timeout=5" 2>/dev/null || true)
+    n=$(printf '%s' "$upd" | jq -r '.result | length' 2>/dev/null || echo "?")
+    last_chat=$(printf '%s' "$upd" | jq -r '.result[-1].message.chat.id // empty' 2>/dev/null)
+    last_text=$(printf '%s' "$upd" | jq -r '.result[-1].message.text // empty' 2>/dev/null)
+    if [[ "$n" == "0" ]]; then
+        warn "Belum ada pesan masuk ke bot sama sekali."
+        echo "  Buka Telegram, cari @${username}, kirim /start, lalu ulangi diagnosa."
+    elif [[ -n "$last_chat" && "$last_chat" != "$admin" ]]; then
+        error "Pesan terakhir datang dari chat ID $last_chat, tapi bot hanya menjawab $admin."
+        echo "  Penyebabnya: kamu chat dari akun/chat yang berbeda, atau ADMIN_CHAT_ID salah ketik."
+        echo "  Pesan terakhir: '${last_text:-?}'"
+        echo "  Ambil ID yang benar: chat @userinfobot dari akun yang sama, lalu install ulang (menu 11 > 01)."
+    elif [[ -n "$last_chat" ]]; then
+        info "Pesanmu sudah sampai ke bot (chat ID $admin cocok, terakhir: '${last_text:-?}')."
+        echo "  Kalau bot tetap diam, restart bot (menu 11 > 02) lalu ulangi diagnosa."
+    else
+        warn "getUpdates tidak mengembalikan pesan (n=$n)."
+    fi
+    echo "--- 5. Kirim pesan tes ---"
+    local ans sent
+    read -r -p "Kirim pesan tes ke chat admin ($admin)? [y/N]: " ans
+    if [[ ${ans:-} =~ ^[Yy]$ ]]; then
+        sent=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${token}/sendMessage" -d "chat_id=${admin}" --data-urlencode "text=Bot vps-manager aktif - ini pesan tes." 2>/dev/null || true)
+        if printf '%s' "$sent" | grep -q '"ok":true'; then
+            info "Pesan tes TERKIRIM — cek Telegram kamu sekarang."
+        elif printf '%s' "$sent" | grep -q '403'; then
+            error "Pesan tes DITOLAK (403): bot diblokir, atau kamu belum pernah /start ke bot ini."
+            echo "  Buka @${username}, tekan START, lalu ulangi diagnosa."
+        elif printf '%s' "$sent" | grep -q '400'; then
+            error "Pesan tes gagal (400): chat ID $admin tidak ditemukan Telegram."
+            echo "  Ambil ID yang benar dari @userinfobot lalu install ulang (menu 11 > 01)."
+        else
+            error "Pesan tes gagal: $sent"
+        fi
+    else
+        info "Pesan tes dilewati."
+    fi
+}
+
 submenu_bot() {
     while true; do
         echo "================= BOT TELEGRAM =================="
@@ -2091,11 +2210,12 @@ submenu_bot() {
         echo "  [02] Restart Bot"
         echo "  [03] Stop Bot"
         echo "  [04] Hapus Bot"
+        echo "  [05] Diagnosa Bot (kenapa tidak respon)"
         echo "  [b]  Back"
         echo "  [x]  EXIT"
         echo
         local pil=""
-        read -r -p "Pilih [1-4/b/x]: " pil
+        read -r -p "Pilih [1-5/b/x]: " pil
         case "$pil" in
             1) setup_bot || warn "Instal bot tidak selesai." ;;
             2) systemctl restart vps-bot 2>/dev/null && info "Bot di-restart: $(bot_status)" || warn "Restart gagal." ;;
@@ -2112,6 +2232,7 @@ submenu_bot() {
                     info "Dibatalkan."
                 fi
                 ;;
+            5) bot_check || warn "Diagnosa bot gagal." ;;
             b|B) return 0 ;;
             x|X) echo "Sampai jumpa!"; exit 0 ;;
             *) error "Pilihan tidak valid: ${pil}" ;;
@@ -3132,6 +3253,7 @@ PENGGUNAAN:
   bash vps-manager.sh --install --mode domain --domain contoh.com --email admin@contoh.com
   bash vps-manager.sh --install --mode reality
   bash vps-manager.sh --setup-bot --bot-token 123456:ABC-DEF --admin-chat-id 123456789
+  bash vps-manager.sh --bot-check          Diagnosa bot Telegram (token, chat ID, pesan tes)
 
   bash vps-manager.sh --create ssh    --name user1 --days 30 [--password rahasia]
   bash vps-manager.sh --create vmess  --name user1 --days 30 [--limit-ip 2]
@@ -3183,6 +3305,7 @@ main() {
             --check-expired) cmd="check-expired"; shift ;;
             --check) cmd="check"; shift ;;
             --setup-bot) cmd="setup-bot"; shift ;;
+            --bot-check) cmd="bot-check"; shift ;;
             --bot-token) bot_token="${2:-}"; shift 2 ;;
             --admin-chat-id) admin_chat_id="${2:-}"; shift 2 ;;
             --yes) FORCE=1; shift ;;
@@ -3223,6 +3346,7 @@ main() {
         check-expired) check_expired ;;
         check) do_check ;;
         setup-bot) setup_bot "$bot_token" "$admin_chat_id" ;;
+        bot-check) bot_check ;;
         uninstall) do_uninstall ;;
         *) error "Tidak ada perintah. Jalankan: bash vps-manager.sh --help"; exit 1 ;;
     esac

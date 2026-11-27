@@ -218,6 +218,26 @@ menu
 # pilih 11) Bot Telegram → 01 Instal / Update Bot → isi token + Chat ID
 ```
 
+**Bot tidak ada respon?** Jalankan diagnosa — dia memeriksa service, log,
+format token, lalu mengecek token ke Telegram (getMe) dan pesan masuk
+terakhir (getUpdates), plus menawarkan kirim pesan tes:
+
+```bash
+menu
+# pilih 11) Bot Telegram → 05 Diagnosa Bot
+```
+
+atau langsung:
+
+```bash
+vps-manager --bot-check
+```
+
+Penyebab yang paling sering: token salah/sudah diganti (getMe 401),
+VPS tidak bisa mencapai api.telegram.org (DNS), chat dari akun/Chat ID
+yang berbeda dari yang dikonfigurasi, atau belum `/start` ke bot yang
+benar. Diagnosa menampilkan semuanya — termasuk username bot yang benar.
+
 atau langsung:
 
 ```bash
