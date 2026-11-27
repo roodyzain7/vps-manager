@@ -3558,6 +3558,9 @@ menu_loop() {
 # Dibuat setelah kasus user: install sukses tapi VPN "tidak jalan" dan dugaan
 # "webserver mati" ternyata salah (Nginx hidup, HTTPS 200 dari luar).
 # Arti hasil uji WS path:
+#   101 = NORMAL (paling bagus: handshake WebSocket berhasil penuh, Nginx ->
+#         Xray jalan; curl lalu menunggu dan timeout karena tidak ada payload
+#         VMess — itu wajar, bukan error)
 #   400 = NORMAL (Nginx meneruskan ke Xray; Xray menolak karena bukan handshake
 #         VMess — itu yang diharapkan dari curl polos)
 #   200 = path TIDAK dikenali Nginx (jatuh ke location /) -> link klien pakai
@@ -3610,36 +3613,42 @@ do_check() {
     if [[ "$mode" == "domain" && -n "$domain" ]]; then
         local vp code
         vp=$(state_get '.install.ws_paths.vmess // "/vmess"')
-        code=$(curl -sk --max-time 8 --resolve "${domain}:443:127.0.0.1" "https://${domain}/" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+        code=$(curl -sk --max-time 8 --resolve "${domain}:443:127.0.0.1" "https://${domain}/" -o /dev/null -w "%{http_code}" 2>/dev/null || true)
+        code=${code:-000}
         if [[ "$code" == "200" ]]; then
             info "HTTPS ${domain}/ : 200 (Nginx + TLS OK)"
         else
             error "HTTPS ${domain}/ : ${code} (Nginx/TLS bermasalah)"
             ok=0
         fi
-        code=$(curl -sk --max-time 8 --resolve "${domain}:443:127.0.0.1" "https://${domain}${vp}" \
+        code=$(curl -sk --http1.1 --max-time 5 --resolve "${domain}:443:127.0.0.1" "https://${domain}${vp}" \
             -H "Connection: Upgrade" -H "Upgrade: websocket" \
             -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
-            -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+            -o /dev/null -w "%{http_code}" 2>/dev/null || true)
+        code=${code:-000}
         case "$code" in
+            101) info "WS ${vp} : 101 (NORMAL — WebSocket handshake berhasil, Nginx -> Xray jalan)" ;;
             400) info "WS ${vp} : 400 (NORMAL — Nginx terus ke Xray, tinggal handshake VMess klien)" ;;
             200) error "WS ${vp} : 200 — path TIDAK dikenali Nginx, link klien pakai path lama! Ambil link baru dari menu 9."; ok=0 ;;
             502) error "WS ${vp} : 502 — Nginx hidup tapi Xray tidak menjawab (cek: systemctl status xray)"; ok=0 ;;
             *)   error "WS ${vp} : ${code} — rantai putus di Nginx/Xray"; ok=0 ;;
         esac
         # Link permanen script harus bisa diunduh (200).
-        code=$(curl -sk --max-time 8 --resolve "${domain}:443:127.0.0.1" "https://${domain}/vps-manager.sh" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+        code=$(curl -sk --max-time 8 --resolve "${domain}:443:127.0.0.1" "https://${domain}/vps-manager.sh" -o /dev/null -w "%{http_code}" 2>/dev/null || true)
+        code=${code:-000}
         if [[ "$code" == "200" ]]; then
             info "Link permanen https://${domain}/vps-manager.sh : 200 (bisa diunduh, tidak expired)"
         else
             warn "Link permanen https://${domain}/vps-manager.sh : ${code} (cek Nginx location /vps-manager.sh)"
         fi
         # Uji yang sama di port 80 non-TLS.
-        code=$(curl -s --max-time 8 "http://${domain}${vp}" \
+        code=$(curl -s --max-time 5 --resolve "${domain}:80:127.0.0.1" "http://${domain}${vp}" \
             -H "Connection: Upgrade" -H "Upgrade: websocket" \
             -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
-            -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+            -o /dev/null -w "%{http_code}" 2>/dev/null || true)
+        code=${code:-000}
         case "$code" in
+            101) info "WS non-TLS ${vp} (port 80) : 101 (NORMAL — WebSocket handshake berhasil)" ;;
             400) info "WS non-TLS ${vp} (port 80) : 400 (NORMAL)" ;;
             200) error "WS non-TLS ${vp} (port 80) : 200 — path tidak dikenali di port 80"; ok=0 ;;
             502) error "WS non-TLS ${vp} (port 80) : 502 — Nginx hidup tapi Xray tidak menjawab"; ok=0 ;;
