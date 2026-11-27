@@ -244,7 +244,7 @@ konfirmasi bot tetap teks biasa.
 ## Features (menu 12)
 
 Submenu perbaikan dan utilitas, seperti menu FEATURES di screenshot
-referensi — 28 item dalam 5 bagian:
+referensi — 29 item dalam 5 bagian:
 
 ```
 FEATURES
@@ -332,6 +332,21 @@ OTHER
                                 langsung) + 1194 UDP (klien standar).
                                 Hapus: menu 7 — sertifikat di-revoke +
                                 CRL diperbarui.)
+ 29.) Pilih Versi Dropbear   (dua versi Dropbear dari source resmi
+                                matt.ucc.asn.au, bisa ganti kapan saja:
+                                2019.78 (versi lama, ringan — dari RPM
+                                Fedora yang tidak jalan di Ubuntu, jadi
+                                di-build dari source) atau 2026.94
+                                (versi baru, aman). Binary tiap versi di
+                                /usr/local/sbin/dropbear-<versi>; yang
+                                aktif disalin ke /usr/sbin/dropbear.
+                                Port tetap 109 + 143. Pilihan disimpan
+                                di state (.install.dropbear_version).
+                                Build pertama ~1 menit (butuh gcc/make/
+                                zlib); ganti versi sesudahnya instan
+                                karena binary sudah ada. Running Service
+                                menampilkan versi aktif, misal
+                                "Dropbear 2019.78".)
   x . EXIT
 ```
 

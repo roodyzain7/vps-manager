@@ -82,6 +82,15 @@ readonly OVPN_UDP_PORT=1194
 readonly OVPN_UDP_SUBNET="10.11.0.0"
 # OHP OpenVPN: HTTP tunnel 8383 -> OpenVPN SSL 127.0.0.1:1195.
 readonly OHP_OVPN_PORT=8383
+# Dua versi Dropbear (source resmi matt.ucc.asn.au) — bisa dipilih di
+# menu Features 29. 2019.78 = versi lama/ringan (dari RPM Fedora yang
+# user kirim, tapi RPM itu tidak jalan di Ubuntu jadi di-build dari
+# source); 2026.94 = versi terbaru/aman.
+readonly DROPBEAR_VER_OLD="2019.78"
+readonly DROPBEAR_URL_OLD="https://matt.ucc.asn.au/dropbear/releases/dropbear-2019.78.tar.bz2"
+readonly DROPBEAR_VER_NEW="2026.94"
+readonly DROPBEAR_URL_NEW="https://matt.ucc.asn.au/dropbear/releases/dropbear-2026.94.tar.bz2"
+readonly DROPBEAR_BIN_DIR="/usr/local/sbin"
 readonly OVPN_DIR="/etc/openvpn/server"
 readonly OVPN_WS_DIR="/opt/ws-ovpn"
 
@@ -1043,13 +1052,175 @@ install_reality() {
 
 # Dropbear SSH di 109/143 (dipakai HTTP Custom + Running Service).
 # OpenSSH tetap di 22 — Dropbear TIDAK menggantikannya, hanya tambahan.
+# Dua versi tersedia (source resmi): 2019.78 (lama/ringan) dan 2026.94
+# (baru/aman). Binary tiap versi di /usr/local/sbin/dropbear-<versi>;
+# yang aktif disalin ke /usr/sbin/dropbear. Pilihan di state.json
+# (.install.dropbear_version). Ganti versi: menu Features 29.
+dropbear_current_version() {
+    # Versi Dropbear yang sedang aktif ("2019.78" / "2026.94" / "" bila
+    # belum ketahuan). Utamakan state, fallback ke `dropbear -V`.
+    local v
+    v=$(state_get '.install.dropbear_version // ""' 2>/dev/null)
+    if [[ -n "$v" ]]; then echo "$v"; return 0; fi
+    if command -v dropbear >/dev/null 2>&1; then
+        v=$(dropbear -V 2>&1 | head -1 | sed -E 's/.*v([0-9]+\.[0-9]+).*/\1/')
+        [[ -n "$v" ]] && echo "$v" && return 0
+    fi
+    echo ""
+}
+
+dropbear_build_version() {
+    # $1 = versi ("2019.78" / "2026.94"). Unduh source resmi, compile,
+    # simpan binary ke /usr/local/sbin/dropbear-<versi> (+ dropbearkey).
+    # Return 0 bila binary sudah ada atau berhasil di-build.
+    local ver="$1" url="" tmpdir="" tarball=""
+    case "$ver" in
+        "$DROPBEAR_VER_OLD") url="$DROPBEAR_URL_OLD" ;;
+        "$DROPBEAR_VER_NEW") url="$DROPBEAR_URL_NEW" ;;
+        *) error "Versi Dropbear tidak dikenal: $ver (pilih $DROPBEAR_VER_OLD atau $DROPBEAR_VER_NEW)."; return 1 ;;
+    esac
+    local bin="$DROPBEAR_BIN_DIR/dropbear-$ver"
+    if [[ -x "$bin" ]]; then
+        info "Dropbear $ver sudah ter-build ($bin)."
+        return 0
+    fi
+    info "Build Dropbear $ver dari source resmi (butuh gcc/make/zlib, ~1 menit)..."
+    fix_dns
+    DEBIAN_FRONTEND=noninteractive apt-get install -y gcc make zlib1g-dev bzip2 2>/dev/null         || { error "Gagal install build tools (gcc/make/zlib1g-dev/bzip2) — cek apt."; return 1; }
+    tmpdir=$(mktemp -d /tmp/dropbear-build-XXXXXX) || { error "Gagal buat folder build."; return 1; }
+    tarball="$tmpdir/dropbear-$ver.tar.bz2"
+    # Unduh source (retry + fallback tanpa proxy bila proxy bermasalah).
+    if ! curl -fsSL --max-time 120 --retry 2 "$url" -o "$tarball" 2>/dev/null; then
+        if ! curl -fsSL --noproxy "*" --max-time 120 --retry 2 "$url" -o "$tarball" 2>/dev/null; then
+            error "Gagal unduh source Dropbear $ver dari $url — cek internet/DNS."
+            rm -rf "$tmpdir"; return 1
+        fi
+    fi
+    if ! tar -xjf "$tarball" -C "$tmpdir"; then
+        error "Tarball Dropbear $ver rusak / gagal ekstrak."
+        rm -rf "$tmpdir"; return 1
+    fi
+    mkdir -p "$DROPBEAR_BIN_DIR"
+    (
+        cd "$tmpdir/dropbear-$ver" || exit 1
+        ./configure --prefix=/usr/local --disable-pam --enable-zlib >/dev/null 2>&1 || exit 1
+        make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1 || exit 1
+        install -m 755 dropbear "$bin" || exit 1
+        install -m 755 dropbearkey "$DROPBEAR_BIN_DIR/dropbearkey-$ver" || exit 1
+    ) || {
+        error "Build Dropbear $ver gagal — lihat log di atas."
+        rm -rf "$tmpdir"; return 1
+    }
+    rm -rf "$tmpdir"
+    info "Dropbear $ver berhasil di-build: $bin"
+    return 0
+}
+
+dropbear_ensure_host_keys() {
+    # Host key Dropbear di /etc/dropbear/. Bila belum ada, buat dengan
+    # dropbearkey versi yang aktif (RSA + ECDSA; Ed25519 bila didukung).
+    mkdir -p /etc/dropbear
+    local keygen="${DROPBEAR_BIN_DIR}/dropbearkey-$(dropbear_current_version 2>/dev/null)"
+    [[ -x "$keygen" ]] || keygen="$(command -v dropbearkey 2>/dev/null || echo /usr/bin/dropbearkey)"
+    if [[ ! -f /etc/dropbear/dropbear_rsa_host_key ]]; then
+        "$keygen" -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null             || warn "Gagal buat host key RSA Dropbear."
+    fi
+    if [[ ! -f /etc/dropbear/dropbear_ecdsa_host_key ]]; then
+        "$keygen" -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null             || warn "Gagal buat host key ECDSA Dropbear."
+    fi
+    if [[ ! -f /etc/dropbear/dropbear_ed25519_host_key ]]; then
+        "$keygen" -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null || true
+    fi
+}
+
+dropbear_set_version() {
+    # $1 = versi ("2019.78" / "2026.94"). Build bila belum ada, jadikan
+    # aktif (salin ke /usr/sbin/dropbear), simpan pilihan, restart service.
+    local ver="$1"
+    case "$ver" in
+        "$DROPBEAR_VER_OLD"|"$DROPBEAR_VER_NEW") ;;
+        *) error "Versi Dropbear tidak dikenal: $ver."; return 1 ;;
+    esac
+    dropbear_build_version "$ver" || return 1
+    systemctl stop dropbear 2>/dev/null || true
+    install -m 755 "$DROPBEAR_BIN_DIR/dropbear-$ver" /usr/sbin/dropbear         || { error "Gagal pasang binary Dropbear $ver ke /usr/sbin/dropbear."; return 1; }
+    dropbear_ensure_host_keys
+    # Pastikan unit systemd dropbear ada (bila belum pernah apt install,
+    # unit tidak ada dan restart akan gagal). Port 109 + 143, sama seperti
+    # /etc/default/dropbear yang ditulis setup_dropbear().
+    if [[ ! -f /lib/systemd/system/dropbear.service && ! -f /etc/systemd/system/dropbear.service ]]; then
+        cat > /etc/systemd/system/dropbear.service <<'EOF'
+[Unit]
+Description=Dropbear SSH server (vps-manager)
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dropbear -F -E -p 109 -p 143
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+    # Pastikan /etc/default/dropbear juga benar (dipakai apt + info).
+    if [[ -f /etc/default/dropbear ]]; then
+        sed -i 's/^NO_START=.*/NO_START=0/' /etc/default/dropbear 2>/dev/null || true
+        grep -q '^DROPBEAR_PORT=' /etc/default/dropbear \
+            && sed -i 's/^DROPBEAR_PORT=.*/DROPBEAR_PORT=109/' /etc/default/dropbear \
+            || echo "DROPBEAR_PORT=109" >> /etc/default/dropbear
+        grep -q '^DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear \
+            && sed -i 's/^DROPBEAR_EXTRA_ARGS=.*/DROPBEAR_EXTRA_ARGS="-p 143"/' /etc/default/dropbear \
+            || echo 'DROPBEAR_EXTRA_ARGS="-p 143"' >> /etc/default/dropbear
+        sed -i 's/-p 22//g' /etc/default/dropbear
+    fi
+    jq_state --arg v "$ver" '.install.dropbear_version = $v' 2>/dev/null || true
+    systemctl enable dropbear 2>/dev/null || true
+    systemctl restart dropbear 2>/dev/null || systemctl start dropbear 2>/dev/null         || { warn "Dropbear $ver gagal start — cek: systemctl status dropbear"; return 1; }
+    sleep 1
+    if port_tcp 109 || port_tcp 143; then
+        info "Dropbear $ver aktif (109/143)."
+    else
+        warn "Dropbear $ver tidak mendengarkan di 109/143 — cek: systemctl status dropbear"
+        return 1
+    fi
+    return 0
+}
+
+feat_choose_dropbear_version() {
+    # Menu pilih versi Dropbear (Features 29). Build bila belum ada,
+    # ganti yang aktif, simpan pilihan.
+    local cur
+    cur=$(dropbear_current_version)
+    echo "VERSI DROPBEAR SAAT INI: ${cur:-belum ketahuan / versi apt}"
+    echo " 1) Dropbear $DROPBEAR_VER_OLD (versi lama, ringan)"
+    echo " 2) Dropbear $DROPBEAR_VER_NEW (versi baru, aman)"
+    echo " 0) Kembali"
+    local p=""
+    read -r -p "Pilih versi [0-2]: " p || return 0
+    case "$p" in
+        1) dropbear_set_version "$DROPBEAR_VER_OLD" ;;
+        2) dropbear_set_version "$DROPBEAR_VER_NEW" ;;
+        0) return 0 ;;
+        *) warn "Pilihan tidak valid."; return 1 ;;
+    esac
+}
+
 setup_dropbear() {
-    local dpkg_out
-    dpkg_out=$(dpkg -l dropbear 2>/dev/null)
-    if ! grep -q '^ii' <<< "$dpkg_out"; then
-        fix_dns
-        DEBIAN_FRONTEND=noninteractive apt-get install -y dropbear 2>/dev/null \
-            || { warn "Install dropbear gagal (apt) — coba manual: apt install dropbear."; return 1; }
+    # Bila versi sudah dipilih di menu Features 29, pasang source versi
+    # itu (bukan apt). Bila belum dipilih, tetap apt seperti biasa.
+    local chosen
+    chosen=$(state_get '.install.dropbear_version // ""' 2>/dev/null)
+    if [[ -n "$chosen" ]]; then
+        dropbear_set_version "$chosen" || return 1
+    else
+        local dpkg_out
+        dpkg_out=$(dpkg -l dropbear 2>/dev/null)
+        if ! grep -q '^ii' <<< "$dpkg_out"; then
+            fix_dns
+            DEBIAN_FRONTEND=noninteractive apt-get install -y dropbear 2>/dev/null \
+                || { warn "Install dropbear gagal (apt) — coba manual: apt install dropbear."; return 1; }
+        fi
     fi
     if [[ -f /etc/default/dropbear ]]; then
         sed -i 's/^NO_START=.*/NO_START=0/' /etc/default/dropbear 2>/dev/null || true
@@ -3931,7 +4102,7 @@ feat_running_service() {
     svc_line "BadVPN 7100" chk_badvpn7100
     svc_line "BadVPN 7200" chk_badvpn7200
     svc_line "BadVPN 7300" chk_badvpn7300
-    svc_line "Dropbear" chk_dropbear
+    svc_line "Dropbear $(dropbear_current_version)" chk_dropbear
     svc_line "Haproxy" chk_haproxy
     svc_line "Crons" chk_crons
     svc_line "Nginx Webserver" chk_nginx
@@ -4972,6 +5143,7 @@ show_features_menu() {
     echo " 26.) Back to Menu"
     echo " 27.) Fixx Semua Service OFF"
     echo " 28.) Install OpenVPN WS-SSL"
+    echo " 29.) Pilih Versi Dropbear (2019.78 / 2026.94)"
     echo "  x . EXIT"
     printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
 }
@@ -4981,7 +5153,7 @@ submenu_features() {
         clear 2>/dev/null || true
         show_features_menu
         local pilih=""
-        read -r -p "Pilih dari opsi [1-28 atau x]: " pilih || return 0
+        read -r -p "Pilih dari opsi [1-29 atau x]: " pilih || return 0
         # Setiap aksi dibungkus "|| warn" supaya kegagalan kembali ke menu
         # Features, bukan keluar script (pola yang sama seperti menu_loop).
         case "$pilih" in
@@ -5013,6 +5185,7 @@ submenu_features() {
             26) return 0 ;;
             27) feat_fix_all_services || warn "Fixx Semua Service gagal." ;;
             28) feat_install_openvpn || warn "Install OpenVPN gagal." ;;
+            29) feat_choose_dropbear_version || warn "Pilih Versi Dropbear gagal." ;;
             x|X) exit 0 ;;
             *)  error "Pilihan tidak valid: ${pilih}" ;;
         esac
