@@ -1448,7 +1448,7 @@ SSH_PORT = 22
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
-async def handle(ws):
+async def handle(ws, path=None):
     try:
         reader, writer = await asyncio.open_connection(SSH_HOST, SSH_PORT)
     except Exception as e:
@@ -4022,27 +4022,11 @@ feat_fix_nginx() {
 
 feat_fix_ws_epro() {
     echo "=== Fixx WS ePRO ==="
-    # SSH-WS OFF di menu biasanya karena ws-epro belum pernah terpasang
-    # (menu 1 belum dijalankan ulang sesudah versi ws-epro) atau servicenya
-    # gagal start (modul websockets hilang / file rusak). Perbaiki semua itu.
-    if [[ ! -f /opt/ws-epro/ws-epro.py || ! -f /etc/systemd/system/ws-epro.service ]]; then
-        warn "ws-epro belum terpasang — menginstall sekarang."
-        setup_ws_epro
-    else
-        if ! python3 -c "import websockets" 2>/dev/null; then
-            warn "Modul Python 'websockets' tidak ada — menginstall..."
-            if ! (timeout 120 apt-get install -y python3-websockets 2>/dev/null || timeout 120 pip3 install --break-system-packages websockets 2>/dev/null || timeout 120 pip3 install websockets 2>/dev/null); then
-                error "Gagal install websockets — SSH WS tetap tidak bisa jalan."
-                return 1
-            fi
-        fi
-        if ! python3 -m py_compile /opt/ws-epro/ws-epro.py 2>/dev/null; then
-            warn "File ws-epro.py rusak — menulis ulang."
-            setup_ws_epro
-        else
-            systemctl restart ws-epro
-        fi
-    fi
+    # Selalu tulis ulang ws-epro.py dari versi script terbaru (bukan cuma
+    # restart): bila handler-nya yang salah (mis. signature tidak cocok
+    # dengan versi modul websockets), restart saja tidak memperbaiki
+    # apa-apa — file-nya yang harus diperbarui.
+    setup_ws_epro
     sleep 2
     if systemctl is-active --quiet ws-epro; then
         info "ws-epro jalan."
