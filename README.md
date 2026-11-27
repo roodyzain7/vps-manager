@@ -245,6 +245,15 @@ hasil dikirim. QR sekarang dihapus total (tidak ditampilkan, tidak
 disimpan), jadi hasil pembuatan akun selalu sampai utuh ke bot. Bot juga
 menjalankan CLI dengan stdin `/dev/null` supaya tidak pernah menggantung.
 
+Diagnosa (menu 11 > 05) sekarang juga memeriksa **versi file bot & script**
+(langkah 0 — file bot hanya diperbarui saat instal ulang, jadi kalau kamu
+hanya update script, botnya masih versi lama), **proses bot ganda**
+(dua bot berebut pesan Telegram), dan bisa menjalankan **tes buat akun**
+(langkah 6 — membuat akun VMess `bottest` 1 hari lewat jalur yang sama
+persis seperti bot, lalu menghapusnya lagi). Kalau tes itu berhasil tapi
+bot tetap diam, masalahnya ada di bot; kalau tes itu gagal, penyebabnya
+tampil di situ (biasanya Xray gagal start).
+
 atau langsung:
 
 ```bash

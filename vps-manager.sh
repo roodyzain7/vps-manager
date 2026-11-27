@@ -2100,6 +2100,34 @@ bot_status() {
 # -----------------------------------------------------------------------------
 bot_check() {
     echo "=== Diagnosa Bot Telegram ==="
+    echo "--- 0. Versi bot & CLI + proses ganda ---"
+    if [[ -f "$BOT_DIR/bot.py" ]]; then
+        if grep -q "stdin=subprocess.DEVNULL" "$BOT_DIR/bot.py" 2>/dev/null; then
+            info "File bot (/opt/vps-bot/bot.py) VERSI TERBARU."
+        else
+            error "File bot MASIH VERSI LAMA — install ulang bot: menu 11 > 01 (isi token + Chat ID yang sama)."
+            echo "  (File bot hanya diperbarui saat instal ulang; update script saja tidak cukup.)"
+        fi
+    else
+        error "File bot tidak ada — install dulu (menu 11 > 01)."
+    fi
+    local qr_cmd="qrencode -t ANSI""UTF8"
+    if grep -qF "$qr_cmd" "$INSTALL_BIN" 2>/dev/null; then
+        error "Script vps-manager MASIH VERSI LAMA (masih ada QR) — unduh versi terbaru dari GitHub dulu."
+    else
+        info "Script vps-manager sudah versi terbaru (tanpa QR)."
+    fi
+    local nproc
+    nproc=$(pgrep -fc "/opt/vps-bot/bot.py" 2>/dev/null || true)
+    nproc=${nproc:-0}
+    if (( nproc > 1 )); then
+        error "Ada $nproc proses bot.py berjalan — dua bot berebut pesan Telegram!"
+        echo "  Matikan yang zombie: pkill -f bot.py ; lalu menu 11 > 02 (restart bot)."
+    elif (( nproc == 1 )); then
+        info "Proses bot.py: 1 (normal)."
+    else
+        warn "Tidak ada proses bot.py berjalan."
+    fi
     echo "--- 1. Service vps-bot ---"
     local st
     st=$(systemctl is-active vps-bot 2>/dev/null || true)
@@ -2160,8 +2188,8 @@ bot_check() {
     local upd n last_chat last_text
     upd=$(curl -s --max-time 15 "https://api.telegram.org/bot${token}/getUpdates?timeout=5" 2>/dev/null || true)
     n=$(printf '%s' "$upd" | jq -r '.result | length' 2>/dev/null || echo "?")
-    last_chat=$(printf '%s' "$upd" | jq -r '.result[-1].message.chat.id // empty' 2>/dev/null)
-    last_text=$(printf '%s' "$upd" | jq -r '.result[-1].message.text // empty' 2>/dev/null)
+    last_chat=$(printf '%s' "$upd" | jq -r '.result[-1].message.chat.id // empty' 2>/dev/null || true)
+    last_text=$(printf '%s' "$upd" | jq -r '.result[-1].message.text // empty' 2>/dev/null || true)
     if [[ "$n" == "0" ]]; then
         warn "Belum ada pesan masuk ke bot sama sekali."
         echo "  Buka Telegram, cari @${username}, kirim /start, lalu ulangi diagnosa."
@@ -2194,6 +2222,28 @@ bot_check() {
         fi
     else
         info "Pesan tes dilewati."
+    fi
+    echo "--- 6. Tes buat akun (jalur yang sama seperti bot) ---"
+    local ans2 out code
+    read -r -p "Jalankan tes buat akun VMess 'bottest' (1 hari, lalu dihapus)? [y/N]: " ans2
+    if [[ ${ans2:-} =~ ^[Yy]$ ]]; then
+        echo "  Menjalankan: vps-manager --create vmess --name bottest --days 1"
+        code=0
+        out=$("$INSTALL_BIN" --create vmess --name bottest --days 1 </dev/null 2>&1) || code=$?
+        if (( code == 0 )); then
+            info "Tes buat akun BERHASIL (exit 0) — CLI bisa membuat akun."
+            echo "  Kalau bot tetap tidak menampilkan hasil, masalahnya ada di bot (lihat langkah 0-5 di atas)."
+            printf '%s\n' "$out" | grep -a "vmess://" | head -n 2 | sed 's/^/  /'
+        else
+            error "Tes buat akun GAGAL (exit $code) — inilah penyebab bot tidak menampilkan hasil:"
+            printf '%s\n' "$out" | tail -n 15 | sed 's/^/  /'
+            echo "  Periksa Xray: journalctl -u xray -n 20 ; atau menu 12 > 14 (Fixx Xray)."
+        fi
+        # Bersihkan akun tes (bila sempat dibuat).
+        "$INSTALL_BIN" --delete --protocol vmess --name bottest --yes </dev/null >/dev/null 2>&1 || true
+        info "Akun tes 'bottest' dibersihkan."
+    else
+        info "Tes buat akun dilewati."
     fi
 }
 
