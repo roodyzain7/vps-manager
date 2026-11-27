@@ -76,6 +76,10 @@ readonly OVPN_SUBNET="10.9.0.0"
 # Port 443 tidak bisa dipakai (dipegang HAProxy), 1194 dipakai WS-SSL.
 readonly OVPN_SSL_PORT=1195
 readonly OVPN_SSL_SUBNET="10.10.0.0"
+# OpenVPN UDP (standar): UDP 1194 + tun 10.11.0.0/24. TCP 1194 sudah
+# dipakai WS-SSL tapi TCP/UDP tidak bentrok (protokol berbeda).
+readonly OVPN_UDP_PORT=1194
+readonly OVPN_UDP_SUBNET="10.11.0.0"
 readonly OVPN_DIR="/etc/openvpn/server"
 readonly OVPN_WS_DIR="/opt/ws-ovpn"
 
@@ -1712,6 +1716,35 @@ status /var/log/openvpn-ssl-status.log
 verb 3
 explicit-exit-notify 0
 EOF
+    # 3c. Config server UDP (template openvpn-server@udp): OpenVPN standar
+    # lewat UDP, PKI sama, port + subnet beda.
+    cat > "$OVPN_DIR/udp.conf" <<EOF
+port $OVPN_UDP_PORT
+proto udp
+dev tun
+ca $OVPN_DIR/ca.crt
+cert $OVPN_DIR/server.crt
+key $OVPN_DIR/server.key
+dh none
+tls-crypt $OVPN_DIR/ta.key
+crl-verify $OVPN_DIR/crl.pem
+server $OVPN_UDP_SUBNET 255.255.255.0
+topology subnet
+ifconfig-pool-persist $OVPN_DIR/ipp-udp.txt
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 1.1.1.1"
+push "dhcp-option DNS 1.0.0.1"
+keepalive 10 120
+cipher AES-256-GCM
+auth SHA256
+user nobody
+group nogroup
+persist-key
+persist-tun
+status /var/log/openvpn-udp-status.log
+verb 3
+explicit-exit-notify 0
+EOF
     # 4. IP forward + NAT untuk subnet OpenVPN.
     sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
     grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
@@ -1726,6 +1759,9 @@ EOF
     fi
     if ! iptables -t nat -C POSTROUTING -s "${OVPN_SSL_SUBNET}/24" -o "$out_iface" -j MASQUERADE 2>/dev/null; then
         iptables -t nat -A POSTROUTING -s "${OVPN_SSL_SUBNET}/24" -o "$out_iface" -j MASQUERADE 2>/dev/null || warn "Gagal menambah NAT MASQUERADE SSL (klien OpenVPN SSL mungkin tidak bisa internet)."
+    fi
+    if ! iptables -t nat -C POSTROUTING -s "${OVPN_UDP_SUBNET}/24" -o "$out_iface" -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -s "${OVPN_UDP_SUBNET}/24" -o "$out_iface" -j MASQUERADE 2>/dev/null || warn "Gagal menambah NAT MASQUERADE UDP (klien OpenVPN UDP mungkin tidak bisa internet)."
     fi
     if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent save 2>/dev/null || true; fi
     # 5. Jalankan server OpenVPN (template systemd).
@@ -1748,6 +1784,16 @@ EOF
     else
         error "Server OpenVPN SSL gagal start — log:"
         journalctl -u openvpn-server@ssl -n 20 --no-pager 2>/dev/null || true
+        return 1
+    fi
+    systemctl enable openvpn-server@udp 2>/dev/null || true
+    systemctl restart openvpn-server@udp 2>/dev/null || systemctl start openvpn-server@udp 2>/dev/null || true
+    sleep 2
+    if systemctl is-active --quiet openvpn-server@udp 2>/dev/null; then
+        info "Server OpenVPN UDP jalan (UDP $OVPN_UDP_PORT, tun $OVPN_UDP_SUBNET/24)."
+    else
+        error "Server OpenVPN UDP gagal start — log:"
+        journalctl -u openvpn-server@udp -n 20 --no-pager 2>/dev/null || true
         return 1
     fi
     # 6. Jembatan WebSocket ws-ovpn (pola sama seperti ws-epro).
@@ -1856,6 +1902,11 @@ EOF
     else
         warn "OpenVPN SSL masih OFF menurut Running Service — cek: systemctl status openvpn-server@ssl"
     fi
+    if chk_ovpn_udp; then
+        info "OpenVPN UDP: ON (server UDP $OVPN_UDP_PORT jalan)."
+    else
+        warn "OpenVPN UDP masih OFF menurut Running Service — cek: systemctl status openvpn-server@udp"
+    fi
     return 0
 }
 
@@ -1894,6 +1945,7 @@ create_ovpn() { # $1=name $2=days — buat sertifikat klien + file .ovpn
         echo "remote $domain 443"
         echo "remote $domain $OVPN_SERVER_PORT"
         echo "remote $domain $OVPN_SSL_PORT"
+        echo "remote $domain $OVPN_UDP_PORT udp"
         echo "resolv-retry infinite"
         echo "nobind"
         echo "persist-key"
@@ -1930,6 +1982,7 @@ create_ovpn() { # $1=name $2=days — buat sertifikat klien + file .ovpn
     echo "WS-SSL  : $domain:443 (path /ovpn, butuh klien WebSocket)"
     echo "TCP     : $domain:$OVPN_SERVER_PORT (WS-SSL, klien standar)"
     echo "SSL     : $domain:$OVPN_SSL_PORT (OpenVPN SSL langsung, klien standar)"
+    echo "UDP     : $domain:$OVPN_UDP_PORT (OpenVPN UDP, klien standar)"
     return 0
 }
 
@@ -1953,12 +2006,13 @@ feat_install_openvpn() {
     echo "=== Install OpenVPN WS-SSL ==="
     setup_openvpn || return 1
     sleep 1
-    if chk_ovpn_wsssl && chk_ovpn_ssl; then
-        info "OpenVPN WS-SSL + SSL jalan."
+    if chk_ovpn_wsssl && chk_ovpn_ssl && chk_ovpn_udp; then
+        info "OpenVPN WS-SSL + SSL + UDP jalan."
     else
-        error "OpenVPN WS-SSL/SSL gagal jalan — log server:"
+        error "OpenVPN WS-SSL/SSL/UDP gagal jalan — log server:"
         journalctl -u openvpn-server@ws-ssl -n 20 --no-pager 2>/dev/null || true
         journalctl -u openvpn-server@ssl -n 20 --no-pager 2>/dev/null || true
+        journalctl -u openvpn-server@udp -n 20 --no-pager 2>/dev/null || true
         journalctl -u ws-ovpn -n 20 --no-pager 2>/dev/null || true
         return 1
     fi
@@ -2788,6 +2842,7 @@ show_link() {
             echo "WS-SSL     : ${addr}:443 (path /ovpn, butuh klien WebSocket)"
             echo "TCP        : ${addr}:1194 (WS-SSL, klien standar)"
             echo "SSL        : ${addr}:1195 (OpenVPN SSL langsung, klien standar)"
+            echo "UDP        : ${addr}:1194 (OpenVPN UDP, klien standar)"
             echo "----------------------------------------"
             return 0
             ;;
@@ -4811,8 +4866,8 @@ feat_fix_all_services() {
         apply_xray || warn "[Xray] apply gagal — lihat diagnosa di atas."
         sleep 1
     fi
-    if ! chk_ovpn_wsssl || ! chk_ovpn_ssl; then
-        info "[OpenVPN WS-SSL/SSL] ada yang OFF — install server OpenVPN + jembatan WS..."
+    if ! chk_ovpn_wsssl || ! chk_ovpn_ssl || ! chk_ovpn_udp; then
+        info "[OpenVPN WS-SSL/SSL/UDP] ada yang OFF — install server OpenVPN + jembatan WS..."
         setup_openvpn || warn "[OpenVPN] install gagal (lihat pesan di atas)."
     fi
     if ! chk_ohp_ssh || ! chk_ohp_dropbear; then

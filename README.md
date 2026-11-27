@@ -305,28 +305,32 @@ OTHER
                                 Haproxy (multiport), Crons, Nginx, Xray
                                 (bangun ulang config termasuk inbound gRPC +
                                 Shadowsocks baru, lalu restart), OpenVPN
-                                WS-SSL + SSL (install server + jembatan WS
-                                bila OFF, lihat item 28). Yang sudah ON
-                                dilewati.
+                                WS-SSL + SSL + UDP (install server +
+                                jembatan WS bila OFF, lihat item 28).
+                                Yang sudah ON dilewati.
                                 OHP OpenVPN tetap OFF (belum dipasang,
                                 opsional — butuh server OpenVPN yang kini
                                 sudah ada).
  28.) Install OpenVPN WS-SSL   (install server OpenVPN + PKI openssl +
                                 jembatan WebSocket ws-ovpn 127.0.0.1:10091
                                 + Nginx location /ovpn (80 + 443) + NAT;
-                                dua instance: WS-SSL (TCP 1194, tun
-                                10.9.0.0/24) dan SSL langsung (TCP 1195,
-                                tun 10.10.0.0/24 — service "OpenVPN SSL").
-                                Lalu buat akun klien contoh "ovpn" 30 hari.
-                                Service "OpenVPN WS-SSL" dan "OpenVPN SSL"
-                                di Running Service jadi ON. Buat akun lain:
+                                tiga instance: WS-SSL (TCP 1194, tun
+                                10.9.0.0/24), SSL langsung (TCP 1195,
+                                tun 10.10.0.0/24 — service "OpenVPN SSL"),
+                                dan UDP (UDP 1194, tun 10.11.0.0/24 —
+                                service "OpenVPN UDP"; TCP dan UDP 1194
+                                tidak bentrok). Lalu buat akun klien contoh
+                                "ovpn" 30 hari. Service "OpenVPN WS-SSL",
+                                "OpenVPN SSL", dan "OpenVPN UDP" di
+                                Running Service jadi ON. Buat akun lain:
                                 `vps-manager --create ovpn --name <nama>
                                 --days 30` — file .ovpn di
                                 /root/ovpn-<nama>.ovpn, remote 443 (WS-SSL,
                                 butuh klien WebSocket) + 1194 TCP
                                 (WS-SSL, klien standar) + 1195 TCP (SSL
-                                langsung, klien standar). Hapus: menu 7 —
-                                sertifikat di-revoke + CRL diperbarui.)
+                                langsung) + 1194 UDP (klien standar).
+                                Hapus: menu 7 — sertifikat di-revoke +
+                                CRL diperbarui.)
   x . EXIT
 ```
 
