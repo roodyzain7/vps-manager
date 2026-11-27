@@ -1734,9 +1734,27 @@ create_ssh() {
     valid_days "$days" || { error "Hari tidak valid: $days"; return 1; }
     if [[ -z "$password" ]]; then
         if [[ -t 0 ]]; then
-        read -r -s -p "Password (kosongkan = acak 12 karakter): " password; echo
+            # Password SSH wajib diisi manual (tidak dibuat otomatis).
+            while true; do
+                if ! read -r -s -p "Password SSH (wajib diisi, minimal 8 karakter): " password; then
+                    echo
+                    error "Dibatalkan."
+                    return 1
+                fi
+                echo
+                if [[ -z "$password" ]]; then
+                    warn "Password tidak boleh kosong — ketik password SSH."
+                elif ((${#password} < 8)); then
+                    warn "Password minimal 8 karakter."
+                    password=""
+                else
+                    break
+                fi
+            done
+        else
+            error "Password SSH wajib diisi — berikan --password ... (tidak dibuat otomatis lagi)."
+            return 1
         fi
-        [[ -z "$password" ]] && password=$(random_password 12)
     fi
     if ((${#password} < 8)); then error "Password minimal 8 karakter."; return 1; fi
     local expiry
@@ -1955,7 +1973,11 @@ create_trial() {
         '.accounts |= map(if .protocol==$p and .name==$n then .trial=true | .trial_until=$until | .expiry=$today else . end)' \
         || { error "Gagal menandai trial — akun ${name} jadi akun biasa 1 hari."; return 1; }
     echo
+    # Baris konfirmasi trial harus tetap tampil (QUIET dimatikan sesaat —
+    # baris [OK] lain saat trial tetap disembunyikan).
+    local _q="${QUIET:-0}"; QUIET=0
     info "TRIAL ${proto} dibuat: ${name} — aktif ${minutes} menit (sampai $(date -d "@${until_epoch}" '+%H:%M')), lalu dihapus otomatis."
+    QUIET="$_q"
 }
 
 check_trials_quiet() {
@@ -2696,8 +2718,8 @@ def cmd_create(session):
     # "--protocol" dan CLI menolaknya.
     args = ["--create", proto, "--name", name, "--days", days]
     if proto == "ssh":
-        # CLI meminta password bila kosong — beri acak supaya tidak menggantung.
-        args += ["--password", random_password(12)]
+        # Password SSH diisi manual di langkah percakapan (tidak acak).
+        args += ["--password", session["data"].get("password", "")]
     return run_cli(args)
 
 
@@ -2729,6 +2751,8 @@ STEPS = {
         ("proto", "Pilih protokol akun yang dibuat:", PROTO_KEYBOARD),
         ("name", "Nama akun? (huruf kecil, 3-32 karakter, contoh: aku)", None),
         ("days", "Masa aktif berapa hari? (1-365, ketik 0 untuk 30 hari)", None),
+        # Hanya ditanyakan bila protokol SSH (password SSH wajib manual).
+        ("password", "Password SSH? (minimal 8 karakter)", None),
     ],
     "show": [
         ("proto", "Link akun protokol apa?", PROTO_KEYBOARD),
@@ -2854,6 +2878,11 @@ def handle_message(token, admin_id, sessions, msg):
                 send(token, chat_id,
                      "Hari harus angka 1-365. Coba lagi.")
                 return
+        elif field == "password":
+            if len(value) < 8:
+                send(token, chat_id,
+                     "Password minimal 8 karakter. Coba lagi.")
+                return
         elif field == "confirm":
             if value not in ("Ya, Hapus",):
                 sessions.pop(chat_id, None)
@@ -2864,6 +2893,11 @@ def handle_message(token, admin_id, sessions, msg):
 
         session["data"][field] = value
         session["step"] = idx + 1
+        # Lewati langkah password bila protokol bukan SSH.
+        while (session["step"] < len(steps)
+               and steps[session["step"]][0] == "password"
+               and session["data"].get("proto") != "ssh"):
+            session["step"] += 1
         if session["step"] < len(steps):
             _, prompt, kb = steps[session["step"]]
             send(token, chat_id, prompt, kb)
