@@ -103,12 +103,13 @@ jalankan `vps-manager` sekali.)
 ------------------------------------------------------------
   Akun: 3 (aktif: 3, expired: 0) | Hampir expired (<=3 hari): 0
 ============================================================
-  01) Install / Update         07) Hapus Akun
-  02) Buat Akun SSH            08) Perpanjang Akun
-  03) Buat Akun VMess          09) Link Akun
-  04) Buat Akun VLESS          10) Uninstall Bersih
-  05) Buat Akun Trojan         11) Bot Telegram
-  06) List Semua Akun          00) Keluar
+  01) Install / Update         08) Perpanjang Akun
+  02) Buat Akun SSH            09) Link Akun
+  03) Buat Akun VMess          10) Uninstall Bersih
+  04) Buat Akun VLESS          11) Bot Telegram
+  05) Buat Akun Trojan         12) Features
+  06) List Semua Akun          13) Buat Akun Shadowsocks
+  07) Hapus Akun               00) Keluar
 ```
 
 Tampilan di atas adalah versi baru yang rapi seperti screenshot referensi:
@@ -122,7 +123,7 @@ terpasang (`apt install vnstat`); bila belum, tampil total sejak boot.
 ## Features (menu 12)
 
 Submenu perbaikan dan utilitas, seperti menu FEATURES di screenshot
-referensi — 26 item dalam 5 bagian:
+referensi — 27 item dalam 5 bagian:
 
 ```
 FEATURES
@@ -131,7 +132,9 @@ FEATURES
                                 Dropbear, Haproxy, Crons, Nginx, Xray
                                 Vmess/Vless/Trojan/Shadowsocks WS TLS/Non
                                 TLS/gRPC; dicek via systemctl + ss + config
-                                Xray, tanpa error ps)
+                                Xray, tanpa error ps; bila ada yang OFF,
+                                ditawari langsung "Perbaiki semua yang OFF
+                                sekarang? [y/N]" — sama dengan item 27)
   2.) Restart Service          (restart Xray, Nginx, ws-epro, SSH berurutan)
   3.) Auto Reboot              (atur / hapus reboot harian)
   4.) Monitoring               (uptime, load, RAM, disk, traffic, top proses)
@@ -170,6 +173,17 @@ OTHER
  25.) Boster CPU (multi-threading) (governor performance bila tersedia,
                                 naikkan prioritas proses xray/nginx/ws-epro)
  26.) Back to Menu
+ 27.) Fixx Semua Service OFF   (perbaiki semua yang OFF di Running Service
+                                sekaligus, kelompok per kelompok: SSH UDP-HC
+                                + BadVPN (pasang udp-custom 7100/7200/7300),
+                                WS ePRO, Dropbear (109/143), Haproxy
+                                (multiport), Crons, Nginx, Xray (bangun ulang
+                                config termasuk inbound gRPC + Shadowsocks
+                                baru, lalu restart). Yang sudah ON dilewati.
+                                OpenVPN dan OHP TIDAK dipasang — belum ada
+                                servernya di script ini, jadi tetap OFF
+                                dengan pesan jujur; minta 'tambah OpenVPN'
+                                / 'tambah OHP' bila mau dipasang.)
   x . EXIT
 ```
 
@@ -193,6 +207,7 @@ bash vps-manager.sh --create ssh    --name user1 --days 30 --password Rahasia123
 bash vps-manager.sh --create vmess  --name user1 --days 30 --limit-ip 2
 bash vps-manager.sh --create vless  --name user1 --days 30 --transport ws
 bash vps-manager.sh --create trojan --name user1 --days 30
+bash vps-manager.sh --create ss     --name user1 --days 30 --password Rahasia123
 
 # Lihat / hapus / perpanjang / tampilkan link
 bash vps-manager.sh --list
@@ -344,8 +359,17 @@ xray -test -config /usr/local/etc/xray/config.json
 nginx -t
 
 # 3. Port yang harus LISTEN (atau cukup: vps-manager --check)
-ss -tlnp | grep -E ':(22|80|443|10001|10002|10003|10090)\b'
+ss -tlnp | grep -E ':(22|80|443|10001|10002|10003|10004|10005|10006|10007|10008|10090)\b'
 vps-manager --check   # cek rantai Nginx -> Xray -> path WS (80 & 443)
+
+# Inbound Xray (localhost, di belakang Nginx):
+#   10001 VMess WS /vmess | 10002 VLESS WS /vless | 10003 Trojan WS /trojan
+#   10004 VLESS gRPC (vless-grpc) | 10005 VMess gRPC (vmess-grpc)
+#   10006 Trojan gRPC (trojan-grpc) | 10007 Shadowsocks WS /ss
+#   10008 Shadowsocks gRPC (ss-grpc) | 10085 Stats API
+# Shadowsocks: menu 13 atau --create ss; link TLS (443) + Non-TLS (80) +
+# gRPC (443), plugin v2ray-plugin, method aes-256-gcm. Bot Telegram juga
+# punya tombol Shadowsocks (install ulang bot via menu 11 > 01 dulu).
 
 # 4. Import link di v2rayNG — harus konek, lalu cek IP berubah
 # 5. Cek expiry
@@ -367,6 +391,7 @@ journalctl -u xray -n 50 --no-pager
 | Lupa password SSH akun | Password SSH tidak disimpan di server (sengaja). Reset manual: `passwd <nama-user>` sebagai root, lalu perpanjang bila perlu. |
 | Domain belum resolve | `curl https://api.ipify.org` untuk IP VPS, lalu samakan A record domain dengan IP itu. Installer memberi peringatan bila tidak cocok. |
 | SSH terkunci | Script tidak pernah mengubah port 22 dan UFW selalu allow 22 dulu sebelum enable. Bila tetap terkunci, akses via console provider VPS. |
+| Running Service banyak OFF padahal layanan jalan | Dua penyebab: (1) layanan memang belum terpasang — perbaiki via menu 12 → 27 (Fixx Semua Service OFF); (2) bug cek port di versi lama: `ss \| grep -q` di bawah `set -o pipefail` bisa mati kena SIGPIPE (grep keluar duluan, ss exit 141) sehingga port yang LISTEN dilaporkan OFF secara acak. Sejak 27 Nov 2026, semua cek menangkap output `ss` dulu baru grep — hasil Running Service kini stabil. Bila masih ada yang OFF, itu memang belum terpasang (OpenVPN/OHP sengaja tidak dipasang). |
 
 ## Uninstall bersih
 

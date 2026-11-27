@@ -56,6 +56,10 @@ readonly PORT_VMESS_WS=10001
 readonly PORT_VLESS_WS=10002
 readonly PORT_TROJAN_WS=10003
 readonly PORT_VLESS_GRPC=10004
+readonly PORT_VMESS_GRPC=10005
+readonly PORT_TROJAN_GRPC=10006
+readonly PORT_SS_WS=10007
+readonly PORT_SS_GRPC=10008
 readonly PORT_XRAY_API=10085
 
 # Warna terminal
@@ -236,7 +240,7 @@ confirm_destructive() {
 #       "installed_at": "2026-11-27T02:00:00+07:00"
 #     },
 #     "accounts": [
-#       {"protocol": "ssh|vmess|vless|trojan", "name": "", "uuid": "", "password": "",
+#       {"protocol": "ssh|vmess|vless|trojan|ss", "name": "", "uuid": "", "password": "",
 #        "expiry": "2026-12-27", "limit_ip": null, "flow": "", "transport": "ws|tcp",
 #        "status": "active|expired|locked", "created_at": "2026-11-27"}
 #     ]
@@ -340,8 +344,9 @@ rollback_config() {
 # Cek port bentrok sebelum bind
 # -----------------------------------------------------------------------------
 check_port_free() { # $1=port $2=protokol(tcp/udp) — 0 bila bebas
-    local port="$1" proto="${2:-tcp}"
-    if ss -tlnp 2>/dev/null | grep -qE ":${port}[[:space:]]"; then
+    local port="$1" proto="${2:-tcp}" ss_out
+    ss_out=$(ss -tlnp 2>/dev/null)
+    if grep -qE ":${port}[[:space:]]" <<< "$ss_out"; then
         return 1
     fi
     return 0
@@ -440,11 +445,15 @@ build_xray_config() {
     trojan_clients=$(jq -c '[.accounts[] | select(.protocol=="trojan" and .status=="active")
         | {password: .password, email: .name}]' "$STATE_FILE")
 
+    ss_clients=$(jq -c '[.accounts[] | select(.protocol=="ss" and .status=="active")
+        | {password: .password, method: (.method // "aes-256-gcm"), email: .name}]' "$STATE_FILE")
+
     mkdir -p "$(dirname "$XRAY_CONFIG")"
     jq -n \
         --argjson vmess "$vmess_clients" \
         --argjson vless "$vless_clients" \
         --argjson trojan "$trojan_clients" \
+        --argjson ss "$ss_clients" \
         --arg mode "$mode" \
         --arg vmess_path "$vmess_path" \
         --arg vless_path "$vless_path" \
@@ -479,6 +488,22 @@ build_xray_config() {
                settings: {clients: $vless, decryption: "none"},
                streamSettings: {network: "grpc", grpcSettings: {serviceName: "vless-grpc"}},
                tag: "vless-grpc"},
+              {port: 10005, listen: "127.0.0.1", protocol: "vmess",
+               settings: {clients: $vmess},
+               streamSettings: {network: "grpc", grpcSettings: {serviceName: "vmess-grpc"}},
+               tag: "vmess-grpc"},
+              {port: 10006, listen: "127.0.0.1", protocol: "trojan",
+               settings: {clients: $trojan},
+               streamSettings: {network: "grpc", grpcSettings: {serviceName: "trojan-grpc"}},
+               tag: "trojan-grpc"},
+              {port: 10007, listen: "127.0.0.1", protocol: "shadowsocks",
+               settings: {clients: $ss},
+               streamSettings: {network: "ws", wsSettings: {path: "/ss"}},
+               tag: "ss-ws"},
+              {port: 10008, listen: "127.0.0.1", protocol: "shadowsocks",
+               settings: {clients: $ss},
+               streamSettings: {network: "grpc", grpcSettings: {serviceName: "ss-grpc"}},
+               tag: "ss-grpc"},
               {port: 10085, listen: "127.0.0.1", protocol: "dokodemo-door",
                settings: {address: "127.0.0.1"},
                tag: "api"}
@@ -615,7 +640,9 @@ setup_ufw() {
         # VMess WS tanpa TLS di mode reality listen di 10001 (publik).
         ufw allow 10001/tcp comment 'VMess WS (reality)' >/dev/null 2>&1 || true
     fi
-    if ! ufw status 2>/dev/null | grep -q "Status: active"; then
+    local ufw_out
+    ufw_out=$(ufw status 2>/dev/null)
+    if ! grep -q "Status: active" <<< "$ufw_out"; then
         # Port 22 sudah di-allow di atas, jadi enable aman.
         ufw --force enable >/dev/null 2>&1 || warn "Gagal mengaktifkan UFW — cek manual: ufw status"
     fi
@@ -795,6 +822,14 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
     }
+    # Shadowsocks WS
+    location /ss {
+        proxy_pass http://127.0.0.1:${PORT_SS_WS};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+    }
     location /ssh-ws {
         proxy_pass http://127.0.0.1:10090;
         proxy_http_version 1.1;
@@ -843,6 +878,14 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
     }
+    # Shadowsocks WS
+    location /ss {
+        proxy_pass http://127.0.0.1:${PORT_SS_WS};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+    }
     # SSH over WebSocket via jembatan ws-epro (127.0.0.1:10090 -> SSH 22).
     # JANGAN proxy langsung ke 127.0.0.1:22: Nginx tidak menerjemahkan frame
     # WebSocket menjadi TCP mentah, jadi klien SSH/HTTP Custom tidak akan connect.
@@ -852,6 +895,20 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
+    }
+
+    # gRPC (VLESS/VMess/Trojan/Shadowsocks) — serviceName = path; butuh HTTP/2 (sudah aktif di 443).
+    location /vless-grpc {
+        grpc_pass grpc://127.0.0.1:${PORT_VLESS_GRPC};
+    }
+    location /vmess-grpc {
+        grpc_pass grpc://127.0.0.1:${PORT_VMESS_GRPC};
+    }
+    location /trojan-grpc {
+        grpc_pass grpc://127.0.0.1:${PORT_TROJAN_GRPC};
+    }
+    location /ss-grpc {
+        grpc_pass grpc://127.0.0.1:${PORT_SS_GRPC};
     }
 
     # Link PERMANEN script ini (permintaan user — tidak ada expired):
@@ -966,6 +1023,104 @@ install_reality() {
     info "Keypair REALITY dibuat. Public key (untuk link klien): ${pub}"
     info "ShortId: ${sid} | SNI tujuan: www.microsoft.com"
 }
+
+# Dropbear SSH di 109/143 (dipakai HTTP Custom + Running Service).
+# OpenSSH tetap di 22 — Dropbear TIDAK menggantikannya, hanya tambahan.
+setup_dropbear() {
+    local dpkg_out
+    dpkg_out=$(dpkg -l dropbear 2>/dev/null)
+    if ! grep -q '^ii' <<< "$dpkg_out"; then
+        fix_dns
+        DEBIAN_FRONTEND=noninteractive apt-get install -y dropbear 2>/dev/null \
+            || { warn "Install dropbear gagal (apt) — coba manual: apt install dropbear."; return 1; }
+    fi
+    if [[ -f /etc/default/dropbear ]]; then
+        sed -i 's/^NO_START=.*/NO_START=0/' /etc/default/dropbear 2>/dev/null || true
+        if grep -q '^DROPBEAR_PORT=' /etc/default/dropbear; then
+            sed -i 's/^DROPBEAR_PORT=.*/DROPBEAR_PORT=109/' /etc/default/dropbear
+        else
+            echo "DROPBEAR_PORT=109" >> /etc/default/dropbear
+        fi
+        if grep -q '^DROPBEAR_EXTRA_ARGS=' /etc/default/dropbear; then
+            sed -i 's/^DROPBEAR_EXTRA_ARGS=.*/DROPBEAR_EXTRA_ARGS="-p 143"/' /etc/default/dropbear
+        else
+            echo 'DROPBEAR_EXTRA_ARGS="-p 143"' >> /etc/default/dropbear
+        fi
+        # Jangan sampai ada "-p 22" (bentrok OpenSSH).
+        sed -i 's/-p 22//g' /etc/default/dropbear
+    fi
+    systemctl enable dropbear 2>/dev/null || true
+    systemctl restart dropbear 2>/dev/null || systemctl start dropbear 2>/dev/null \
+        || { warn "Dropbear gagal start — cek: systemctl status dropbear"; return 1; }
+    sleep 1
+    if port_tcp 109 || port_tcp 143; then
+        info "Dropbear jalan (109/143)."
+        ufw allow 109/tcp 2>/dev/null || true
+        ufw allow 143/tcp 2>/dev/null || true
+    else
+        warn "Dropbear tidak mendengarkan di 109/143 — cek: systemctl status dropbear"
+        return 1
+    fi
+}
+
+# SSH UDP-HC: 3 instance udp-custom (UDP 7100/7200/7300 -> SSH 22).
+# Desain ini dari script menu lama (milik sendiri): binary
+# /usr/local/bin/udp-custom, config /etc/udp-custom/config-<port>.json,
+# unit udp-custom-<port>.service. Bila binary sudah ada di VPS, cukup tulis
+# ulang config + unit lalu restart. Bila belum ada, coba unduh dari rilis
+# http-custom/udp-custom (pengganti aztecrabbit yang sudah tidak ada);
+# bila unduhan gagal, laporkan jujur — jangan pura-pura berhasil.
+setup_udp_custom() {
+    if [[ ! -x /usr/local/bin/udp-custom ]]; then
+        warn "Binary udp-custom belum ada — mencoba unduh dari rilis http-custom/udp-custom..."
+        local dl_ok=0
+        if curl -fsSL --max-time 60 -o /tmp/udp-custom \
+            "https://github.com/http-custom/udp-custom/releases/latest/download/udp-custom-linux-amd64" 2>/dev/null; then
+            if [[ -s /tmp/udp-custom ]]; then chmod +x /tmp/udp-custom; mv /tmp/udp-custom /usr/local/bin/udp-custom; dl_ok=1; fi
+        fi
+        if (( dl_ok == 0 )); then
+            rm -f /tmp/udp-custom
+            error "udp-custom tidak bisa diunduh — SSH UDP-HC + BadVPN tetap OFF. Pasang binary manual ke /usr/local/bin/udp-custom lalu jalankan lagi menu 12 > 27."
+            return 1
+        fi
+    fi
+    mkdir -p /etc/udp-custom
+    local p
+    for p in 7100 7200 7300; do
+        printf '%s' "{\"listen\": \"127.0.0.1:${p}\", \"stream-buffer\": 2097152, \"receive-buffer\": 2097152, \"stream\": {\"mode\": \"udp\", \"server\": \"127.0.0.1:22\"}}" > "/etc/udp-custom/config-${p}.json"
+        cat > "/etc/systemd/system/udp-custom-${p}.service" <<EOF
+[Unit]
+Description=SSH UDP-HC ${p}
+After=network.target ssh.service
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/udp-custom server -exclude 1.1.1.1,8.8.8.8 -config /etc/udp-custom/config-${p}.json
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+    done
+    systemctl daemon-reload 2>/dev/null || true
+    for p in 7100 7200 7300; do
+        systemctl enable "udp-custom-${p}" 2>/dev/null || true
+        systemctl restart "udp-custom-${p}" 2>/dev/null || warn "udp-custom-${p} gagal start"
+    done
+    ufw allow 7100/udp 2>/dev/null || true
+    ufw allow 7200/udp 2>/dev/null || true
+    ufw allow 7300/udp 2>/dev/null || true
+    sleep 1
+    local ok=0
+    for p in 7100 7200 7300; do port_udp "$p" && ok=$((ok+1)); done
+    if (( ok == 3 )); then
+        info "SSH UDP-HC jalan (UDP 7100/7200/7300 -> SSH 22)."
+    else
+        warn "udp-custom hanya ${ok}/3 port yang LISTEN — cek: journalctl -u udp-custom-7100 -n 20"
+        return 1
+    fi
+}
+
 
 # Jembatan WebSocket -> TCP untuk SSH (dipakai HTTP Custom dkk via /ssh-ws).
 # Nginx hanya meneruskan upgrade WebSocket; yang mengubah frame WS menjadi TCP
@@ -1371,6 +1526,33 @@ create_trojan() {
     show_link "trojan" "$name"
 }
 
+create_ss() {
+    # $1=name $2=days $3=password(opsional) — Shadowsocks via Xray (WS /ss + gRPC).
+    local name="${1:-}" days="${2:-}" password="${3:-}"
+    [[ -z "$name" ]] && name=$(ask_name "ss")
+    if ! valid_username "$name"; then error "Nama tidak valid: $name"; return 1; fi
+    if state_account_exists "ss" "$name"; then error "Akun Shadowsocks ${name} sudah ada."; return 1; fi
+    [[ -z "$days" ]] && days=$(ask_days)
+    valid_days "$days" || { error "Hari tidak valid: $days"; return 1; }
+    if [[ -z "$password" ]]; then
+        if [[ -t 0 ]]; then
+        read -r -s -p "Password Shadowsocks (kosongkan = acak kuat): " password; echo
+        fi
+        [[ -z "$password" ]] && password=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
+    fi
+    if ((${#password} < 8)); then error "Password minimal 8 karakter."; return 1; fi
+    local expiry acc
+    expiry=$(expiry_iso "$days")
+    acc=$(jq -n --arg name "$name" --arg pw "$password" --arg exp "$expiry" --arg now "$(today_iso)" \
+        '{protocol:"ss", name:$name, uuid:"", password:$pw, method:"aes-256-gcm", expiry:$exp,
+          limit_ip:null, flow:"", transport:"ws", status:"active", created_at:$now}')
+    state_add_account "$acc"
+    apply_xray || { state_del_account "ss" "$name"; error "Gagal menerapkan config — akun dibatalkan."; return 1; }
+    info "Akun Shadowsocks dibuat: ${name} (expired: ${expiry})"
+    show_link "ss" "$name"
+}
+
+
 # -----------------------------------------------------------------------------
 # List, hapus, perpanjang
 # -----------------------------------------------------------------------------
@@ -1398,12 +1580,12 @@ delete_account() {
     # $1=protocol $2=name
     local proto="${1:-}" name="${2:-}"
     if [[ -z "$proto" ]]; then
-        read -r -p "Protokol (ssh/vmess/vless/trojan): " proto
+        read -r -p "Protokol (ssh/vmess/vless/trojan/ss): " proto
     fi
     if [[ -z "$name" ]]; then
         read -r -p "Nama akun: " name
     fi
-    case "$proto" in ssh|vmess|vless|trojan) ;; *) error "Protokol tidak valid: $proto"; return 1 ;; esac
+    case "$proto" in ssh|vmess|vless|trojan|ss) ;; *) error "Protokol tidak valid: $proto"; return 1 ;; esac
     if ! state_account_exists "$proto" "$name"; then
         error "Akun ${proto}/${name} tidak ditemukan."
         return 1
@@ -1425,7 +1607,7 @@ delete_account() {
 renew_account() {
     # $1=protocol $2=name $3=days
     local proto="${1:-}" name="${2:-}" days="${3:-}"
-    if [[ -z "$proto" ]]; then read -r -p "Protokol (ssh/vmess/vless/trojan): " proto; fi
+    if [[ -z "$proto" ]]; then read -r -p "Protokol (ssh/vmess/vless/trojan/ss): " proto; fi
     if [[ -z "$name" ]]; then read -r -p "Nama akun: " name; fi
     if [[ -z "$days" ]]; then days=$(ask_days); fi
     valid_days "$days" || { error "Hari tidak valid: $days"; return 1; }
@@ -1489,7 +1671,7 @@ show_link() {
     # $1=protocol $2=name
     local proto="${1:-}" name="${2:-}"
     if [[ -z "$proto" ]]; then
-        if [[ -t 0 ]]; then read -r -p "Protokol (vmess/vless/trojan/ssh): " proto;
+        if [[ -t 0 ]]; then read -r -p "Protokol (vmess/vless/trojan/ss/ssh): " proto;
         else error "Protokol wajib diisi (--protocol)."; return 1; fi
     fi
     if [[ -z "$name" ]]; then
@@ -1513,7 +1695,7 @@ show_link() {
         addr=$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
     fi
 
-    local link="" link_nontls=""
+    local link="" link_nontls="" link_grpc=""
     case "$proto" in
         ssh)
             local exp
@@ -1574,6 +1756,24 @@ show_link() {
                 link="trojan://${pw}@${addr}:10003?security=none&type=ws&path=${trojan_path}#${name}"
             fi
             ;;
+        ss)
+            local pw method ss_b64
+            pw=$(jq -r --arg n "$name" '.accounts[] | select(.protocol=="ss" and .name==$n) | .password' "$STATE_FILE")
+            method=$(jq -r --arg n "$name" '.accounts[] | select(.protocol=="ss" and .name==$n) | (.method // "aes-256-gcm")' "$STATE_FILE")
+            if [[ "$mode" == "domain" ]]; then
+                ss_b64=$(printf '%s' "${method}:${pw}@${addr}:443" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+                link="ss://${ss_b64}/?plugin=v2ray-plugin%3Btls%3Bhost%3D${addr}%3Bpath%3D%2Fss#${name}"
+                ss_b64=$(printf '%s' "${method}:${pw}@${addr}:80" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+                link_nontls="ss://${ss_b64}/?plugin=v2ray-plugin%3Bhost%3D${addr}%3Bpath%3D%2Fss#${name}-nontls"
+                ss_b64=$(printf '%s' "${method}:${pw}@${addr}:443" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+                link_grpc="ss://${ss_b64}/?plugin=v2ray-plugin%3Btls%3Bmode%3Dgrpc%3BserviceName%3Dss-grpc%3Bhost%3D${addr}#${name}-grpc"
+            else
+                # Mode reality: SS lewat WS 10007 tanpa TLS (port dibuka UFW bila perlu).
+                ss_b64=$(printf '%s' "${method}:${pw}@${addr}:10007" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+                link="ss://${ss_b64}/?plugin=v2ray-plugin%3Bhost%3D${addr}%3Bpath%3D%2Fss#${name}"
+            fi
+            ;;
+
         *)
             error "Protokol tidak dikenal: $proto"
             return 1
@@ -1587,6 +1787,11 @@ show_link() {
         echo
         echo "-- Non-TLS (port 80) --"
         echo "$link_nontls"
+    fi
+    if [[ -n "$link_grpc" ]]; then
+        echo
+        echo "-- gRPC (port 443) --"
+        echo "$link_grpc"
     fi
     echo
     echo "Import link di atas ke v2rayNG / NekoBox / Streisand / FoXray."
@@ -1714,7 +1919,7 @@ import urllib.request
 BOT_CONF = os.environ.get("VPS_BOT_CONF", "/etc/vps-manager/bot.conf")
 VPS_MANAGER = os.environ.get("VPS_MANAGER_BIN", "/usr/local/bin/vps-manager")
 
-PROTOCOLS = ("ssh", "vmess", "vless", "trojan")
+PROTOCOLS = ("ssh", "vmess", "vless", "trojan", "ss")
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{2,31}$")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -1728,7 +1933,7 @@ MAIN_KEYBOARD = {
     "resize_keyboard": True,
 }
 PROTO_KEYBOARD = {
-    "keyboard": [["SSH", "VMess"], ["VLESS", "Trojan"], ["Batal"]],
+    "keyboard": [["SSH", "VMess"], ["VLESS", "Trojan"], ["Shadowsocks", "Batal"]],
     "resize_keyboard": True,
 }
 CONFIRM_KEYBOARD = {
@@ -1976,9 +2181,10 @@ def handle_message(token, admin_id, sessions, msg):
 
         if field == "proto":
             value = value.lower()
+            if value == "shadowsocks": value = "ss"
             if value not in PROTOCOLS:
                 send(token, chat_id,
-                     "Protokol tidak dikenal. Pilih: SSH, VMess, VLESS, Trojan.",
+                     "Protokol tidak dikenal. Pilih: SSH, VMess, VLESS, Trojan, Shadowsocks.",
                      PROTO_KEYBOARD)
                 return
         elif field == "name":
@@ -2209,12 +2415,12 @@ bot_check() {
     read -r -p "Kirim pesan tes ke chat admin ($admin)? [y/N]: " ans
     if [[ ${ans:-} =~ ^[Yy]$ ]]; then
         sent=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${token}/sendMessage" -d "chat_id=${admin}" --data-urlencode "text=Bot vps-manager aktif - ini pesan tes." 2>/dev/null || true)
-        if printf '%s' "$sent" | grep -q '"ok":true'; then
+        if grep -q '"ok":true' <<< "$sent"; then
             info "Pesan tes TERKIRIM — cek Telegram kamu sekarang."
-        elif printf '%s' "$sent" | grep -q '403'; then
+        elif grep -q '403' <<< "$sent"; then
             error "Pesan tes DITOLAK (403): bot diblokir, atau kamu belum pernah /start ke bot ini."
             echo "  Buka @${username}, tekan START, lalu ulangi diagnosa."
-        elif printf '%s' "$sent" | grep -q '400'; then
+        elif grep -q '400' <<< "$sent"; then
             error "Pesan tes gagal (400): chat ID $admin tidak ditemukan Telegram."
             echo "  Ambil ID yang benar dari @userinfobot lalu install ulang (menu 11 > 01)."
         else
@@ -2402,8 +2608,13 @@ traffic_lines() { # cetak MONTH/RX/TX/DAY/RX/TX/TRAFFIC (vnstat bila ada, else t
 feat_pause() { read -r -p "Tekan Enter untuk kembali ke menu Features..." -r _; }
 
 # --- helper pengecekan untuk Running Service (systemctl + ss + pgrep) ---
-port_tcp() { ss -tln 2>/dev/null | grep -q ":$1 "; }
-port_udp() { ss -uln 2>/dev/null | grep -q ":$1 "; }
+# PENTING: tangkap output ss dulu baru grep. `ss | grep -q` di bawah
+# `set -o pipefail` rawan SIGPIPE: grep -q keluar begitu ketemu, ss mati
+# dengan 141, pipeline ikut gagal — port yang sebenarnya LISTEN jadi
+# dilaporkan OFF secara acak (terbukti 12/200 kali di uji). Itu penyebab
+# "banyak yang off" di Running Service padahal layanan jalan.
+port_tcp() { local out; out=$(ss -tln 2>/dev/null); grep -q ":$1 " <<< "$out"; }
+port_udp() { local out; out=$(ss -uln 2>/dev/null); grep -q ":$1 " <<< "$out"; }
 svc_active() { local u; for u in "$@"; do systemctl is-active --quiet "$u" 2>/dev/null && return 0; done; return 1; }
 proc_on() { pgrep -qf "$1" 2>/dev/null; }
 # xray_inbound <protokol> <network>: true bila config Xray punya inbound itu
@@ -2452,10 +2663,14 @@ svc_line() {
     if "$@" >/dev/null 2>&1; then
         printf ' | Service %-25s = %b[ON]%b\n' "$label" "$C_GREEN" "$C_RESET"
     else
+        RS_OFF_COUNT=$(( ${RS_OFF_COUNT:-0} + 1 ))
         printf ' | Service %-25s = %b[OFF]%b\n' "$label" "$C_RED" "$C_RESET"
     fi
 }
 feat_running_service() {
+    local noprompt=0
+    [[ "${1:-}" == "noprompt" ]] && noprompt=1
+    RS_OFF_COUNT=0
     echo "=== Running Service ==="
     svc_line "SSH / TUN" chk_ssh_tun
     svc_line "SSH UDP-HC" chk_ssh_udp
@@ -2491,6 +2706,15 @@ feat_running_service() {
         info "SIAP DIGUNAKAN — Xray + Nginx jalan."
     else
         warn "Ada layanan mati — pakai 2.) Restart Service atau 13.)/14.) Fixx."
+    fi
+    if (( RS_OFF_COUNT > 0 )) && (( noprompt == 0 )) && [[ -t 0 ]]; then
+        echo
+        echo "Ada ${RS_OFF_COUNT} layanan OFF di atas."
+        local ans=""
+        read -r -p "Perbaiki semua yang OFF sekarang? [y/N]: " ans || true
+        if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+            feat_fix_all_services
+        fi
     fi
 }
 
@@ -3097,6 +3321,70 @@ feat_booster_cpu() {
     info "Prioritas proses xray/nginx/ws-epro dinaikkan (nice -5)."
 }
 
+# Perbaiki SEMUA layanan yang OFF di Running Service (dipanggil dari
+# Running Service bila user jawab y, atau langsung dari Features 27).
+# Setiap kelompok hanya diperbaiki bila ada entrinya yang OFF; yang sudah ON
+# dilewati. OpenVPN + OHP TIDAK dipasang di sini — keduanya butuh server
+# sendiri (OpenVPN butuh PKI + NAT, OHP butuh server OpenVPN) dan bukan
+# sekadar "restart"; dilaporkan jujur sebagai belum terpasang.
+feat_fix_all_services() {
+    echo "=== Fixx Semua Service OFF ==="
+    echo "Memeriksa 29 layanan, memperbaiki yang OFF (yang sudah ON dilewati)."
+    echo
+    if ! chk_ssh_tun; then
+        info "[SSH / TUN] OFF — restart OpenSSH..."
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        sleep 1
+        chk_ssh_tun && info "[SSH / TUN] sekarang ON." || warn "[SSH / TUN] masih OFF."
+    fi
+    if ! chk_ssh_udp || ! chk_badvpn7100 || ! chk_badvpn7200 || ! chk_badvpn7300; then
+        info "[SSH UDP-HC / BadVPN] ada yang OFF — setup udp-custom..."
+        setup_udp_custom || warn "[SSH UDP-HC / BadVPN] setup gagal (lihat pesan di atas)."
+    fi
+    if ! chk_wsepro; then
+        info "[WS ePRO] OFF — jalankan Fixx WS ePRO..."
+        feat_fix_ws_epro || warn "[WS ePRO] perbaikan gagal."
+    fi
+    if ! chk_dropbear; then
+        info "[Dropbear] OFF — setup dropbear (109/143)..."
+        setup_dropbear || warn "[Dropbear] setup gagal."
+    fi
+    if ! chk_haproxy; then
+        info "[Haproxy] OFF — jalankan Fixx Haproxy..."
+        feat_fix_haproxy || warn "[Haproxy] perbaikan gagal."
+    fi
+    if ! chk_crons; then
+        info "[Crons] OFF — enable + start cron..."
+        systemctl enable cron 2>/dev/null || systemctl enable crond 2>/dev/null || true
+        systemctl start cron 2>/dev/null || systemctl start crond 2>/dev/null || true
+        sleep 1
+        chk_crons && info "[Crons] sekarang ON." || warn "[Crons] masih OFF."
+    fi
+    if ! chk_nginx; then
+        info "[Nginx] OFF — jalankan Fixx Nginx..."
+        feat_fix_nginx || warn "[Nginx] perbaikan gagal."
+    fi
+    if ! chk_xray_vmess_tls || ! chk_xray_vmess_nontls || ! chk_xray_vmess_grpc \
+        || ! chk_xray_vless_tls || ! chk_xray_vless_nontls || ! chk_xray_vless_grpc \
+        || ! chk_xray_trojan_ws || ! chk_xray_trojan_nonws || ! chk_xray_trojan_grpc \
+        || ! chk_xray_ss_ws || ! chk_xray_ss_nonws || ! chk_xray_ss_grpc; then
+        info "[Xray] ada yang OFF — bangun ulang config (inbound gRPC + Shadowsocks baru ikut) + restart Xray..."
+        apply_xray || warn "[Xray] apply gagal — lihat diagnosa di atas."
+        sleep 1
+    fi
+    if ! chk_ovpn_ssl || ! chk_ovpn_wsssl || ! chk_ovpn_udp || ! chk_ovpn_tcp; then
+        warn "[OpenVPN] belum terpasang — vps-manager belum menginstall server OpenVPN (SSL/WS-SSL/UDP/TCP). Bila mau dipasang, minta 'tambah OpenVPN'."
+    fi
+    if ! chk_ohp_ssh || ! chk_ohp_dropbear || ! chk_ohp_ovpn; then
+        warn "[OHP] belum terpasang — vps-manager belum menginstall OHP (varian OHP OpenVPN juga butuh server OpenVPN). Bila mau dipasang, minta 'tambah OHP'."
+    fi
+    echo
+    echo "=== Hasil sesudah perbaikan ==="
+    feat_running_service noprompt
+    return 0
+}
+
+
 show_features_menu() {
     printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
     printf '  %bFEATURES%b\n' "$C_MAGENTA" "$C_RESET"
@@ -3131,6 +3419,7 @@ show_features_menu() {
     echo " 24.) Limit-on-off XRAY"
     echo " 25.) Boster CPU (multi-threading)"
     echo " 26.) Back to Menu"
+    echo " 27.) Fixx Semua Service OFF"
     echo "  x . EXIT"
     printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
 }
@@ -3140,7 +3429,7 @@ submenu_features() {
         clear 2>/dev/null || true
         show_features_menu
         local pilih=""
-        read -r -p "Pilih dari opsi [1-26 atau x]: " pilih || return 0
+        read -r -p "Pilih dari opsi [1-27 atau x]: " pilih || return 0
         # Setiap aksi dibungkus "|| warn" supaya kegagalan kembali ke menu
         # Features, bukan keluar script (pola yang sama seperti menu_loop).
         case "$pilih" in
@@ -3170,6 +3459,7 @@ submenu_features() {
             24) feat_xray_onoff || warn "Limit-on-off XRAY gagal." ;;
             25) feat_booster_cpu || warn "Boster CPU gagal." ;;
             26) return 0 ;;
+            27) feat_fix_all_services || warn "Fixx Semua Service gagal." ;;
             x|X) exit 0 ;;
             *)  error "Pilihan tidak valid: ${pilih}" ;;
         esac
@@ -3222,13 +3512,13 @@ show_header() {
     printf '%b\n' "${C_BLUE}============================================================${C_RESET}"
 }
 show_menu() {
-    printf '  %b01%b) %-24s %b07%b) %s\n' "$C_CYAN" "$C_RESET" "Install / Update" "$C_CYAN" "$C_RESET" "Hapus Akun"
-    printf '  %b02%b) %-24s %b08%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun SSH" "$C_CYAN" "$C_RESET" "Perpanjang Akun"
-    printf '  %b03%b) %-24s %b09%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VMess" "$C_CYAN" "$C_RESET" "Link Akun"
-    printf '  %b04%b) %-24s %b10%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VLESS" "$C_CYAN" "$C_RESET" "Uninstall Bersih"
-    printf '  %b05%b) %-24s %b11%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun Trojan" "$C_CYAN" "$C_RESET" "Bot Telegram"
-    printf '  %b06%b) %-24s %b12%b) %s\n' "$C_CYAN" "$C_RESET" "List Semua Akun" "$C_CYAN" "$C_RESET" "Features"
-    printf '  %b00%b) %s\n' "$C_CYAN" "$C_RESET" "Keluar"
+    printf '  %b01%b) %-24s %b08%b) %s\n' "$C_CYAN" "$C_RESET" "Install / Update" "$C_CYAN" "$C_RESET" "Perpanjang Akun"
+    printf '  %b02%b) %-24s %b09%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun SSH" "$C_CYAN" "$C_RESET" "Link Akun"
+    printf '  %b03%b) %-24s %b10%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VMess" "$C_CYAN" "$C_RESET" "Uninstall Bersih"
+    printf '  %b04%b) %-24s %b11%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VLESS" "$C_CYAN" "$C_RESET" "Bot Telegram"
+    printf '  %b05%b) %-24s %b12%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun Trojan" "$C_CYAN" "$C_RESET" "Features"
+    printf '  %b06%b) %-24s %b13%b) %s\n' "$C_CYAN" "$C_RESET" "List Semua Akun" "$C_CYAN" "$C_RESET" "Buat Akun Shadowsocks"
+    printf '  %b07%b) %-24s %b00%b) %s\n' "$C_CYAN" "$C_RESET" "Hapus Akun" "$C_CYAN" "$C_RESET" "Keluar"
     echo
 }
 menu_loop() {
@@ -3236,7 +3526,7 @@ menu_loop() {
         show_header
         show_menu
         local pilih=""
-        read -r -p "Pilih menu [0-12]: " pilih || exit 0
+        read -r -p "Pilih menu [0-13]: " pilih || exit 0
         # PENTING: setiap aksi dibungkus "|| warn" supaya kegagalan (mis. install
         # batal karena port dipakai) kembali ke menu, BUKAN keluar script.
         # Sebelum perbaikan ini, "return 1" dari do_install + set -e membuat
@@ -3254,6 +3544,7 @@ menu_loop() {
             10) do_uninstall || warn "Uninstall tidak selesai — kembali ke menu." ;;
             11) submenu_bot || warn "Menu bot tidak selesai — kembali ke menu." ;;
             12) submenu_features || warn "Menu features tidak selesai — kembali ke menu." ;;
+            13) create_ss || warn "Buat akun Shadowsocks tidak selesai — kembali ke menu." ;;
             0)  echo "Sampai jumpa!"; exit 0 ;;
             *)  error "Pilihan tidak valid: ${pilih}" ;;
         esac
@@ -3286,7 +3577,7 @@ do_check() {
         error "Nginx: TIDAK berjalan — coba: systemctl start nginx"
         ok=0
     fi
-    if ss -tln 2>/dev/null | grep -q ':443 '; then
+    if port_tcp 443; then
         info "Port 443: LISTEN"
     else
         error "Port 443: tidak ada yang mendengarkan"
@@ -3303,14 +3594,14 @@ do_check() {
     else
         warn "ws-epro (SSH WS): TIDAK berjalan — /ssh-ws di port 80/443 tidak jalan"
     fi
-    if ss -tln 2>/dev/null | grep -q ':10090 '; then
+    if port_tcp 10090; then
         info "Port 10090 (ws-epro): LISTEN"
     else
         warn "Port 10090 (ws-epro): tidak LISTEN"
     fi
     local pp
-    for pp in 10001 10002 10003 10004 10085; do
-        if ss -tln 2>/dev/null | grep -q ":${pp} "; then
+    for pp in 10001 10002 10003 10004 10005 10006 10007 10008 10085; do
+        if port_tcp "$pp"; then
             info "Port ${pp} (Xray): LISTEN"
         else
             warn "Port ${pp} (Xray): tidak LISTEN"
@@ -3355,7 +3646,7 @@ do_check() {
             *)   error "WS non-TLS ${vp} (port 80) : ${code} — cek Nginx port 80"; ok=0 ;;
         esac
     elif [[ "$mode" == "reality" ]]; then
-        if ss -tln 2>/dev/null | grep -q ':443 '; then
+        if port_tcp 443; then
             info "Port 443 (REALITY): LISTEN"
         else
             error "Port 443 (REALITY): tidak LISTEN"
@@ -3377,7 +3668,7 @@ do_check() {
 # -----------------------------------------------------------------------------
 print_help() {
     cat <<'EOF'
-vps-manager — pengelola akun SSH / VMess / VLESS / Trojan (Xray-core)
+vps-manager — pengelola akun SSH / VMess / VLESS / Trojan / Shadowsocks (Xray-core)
 
 PENGGUNAAN:
   bash vps-manager.sh                        Menu interaktif
@@ -3394,6 +3685,7 @@ PENGGUNAAN:
   bash vps-manager.sh --create vmess  --name user1 --days 30 [--limit-ip 2]
   bash vps-manager.sh --create vless  --name user1 --days 30 [--transport ws|tcp]
   bash vps-manager.sh --create trojan --name user1 --days 30 [--password rahasia]
+  bash vps-manager.sh --create ss     --name user1 --days 30 [--password rahasia]
 
   bash vps-manager.sh --list
   bash vps-manager.sh --delete --protocol vmess --name user1 [--yes]
@@ -3471,7 +3763,8 @@ main() {
                 vmess)  create_vmess "$name" "$days" "$limit_ip" ;;
                 vless)  create_vless "$name" "$days" "$transport" "$limit_ip" ;;
                 trojan) create_trojan "$name" "$days" "$password" ;;
-                *) error "--create butuh protokol: ssh|vmess|vless|trojan"; exit 1 ;;
+                ss)     create_ss "$name" "$days" "$password" ;;
+                *) error "--create butuh protokol: ssh|vmess|vless|trojan|ss"; exit 1 ;;
             esac
             ;;
         delete) delete_account "$proto" "$name" ;;
