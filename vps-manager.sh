@@ -2603,12 +2603,25 @@ def api(token, method, params=None, timeout=30):
     return body.get("result")
 
 
-def send(token, chat_id, text, keyboard=None):
-    """Kirim pesan (potong per 4000 karakter, Telegram maks 4096)."""
+def html_escape(text):
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+
+def send(token, chat_id, text, keyboard=None, code=False):
+    """Kirim pesan (potong per 4000 karakter, Telegram maks 4096).
+    code=True: tampilkan sebagai blok monospace (<pre>) supaya format
+    CEK AKUN yang rata kolomnya tetap rapi di Telegram (font Telegram
+    biasa proporsional, kolomnya jadi tidak sejajar)."""
     text = text or "(tidak ada output)"
-    for i in range(0, len(text), 4000):
-        chunk = text[i : i + 4000]
+    step = 3900 if code else 4000
+    for i in range(0, len(text), step):
+        chunk = text[i : i + step]
         params = {"chat_id": chat_id, "text": chunk}
+        if code:
+            params["text"] = "<pre>%s</pre>" % html_escape(chunk)
+            params["parse_mode"] = "HTML"
         if keyboard is not None and i == 0:
             params["reply_markup"] = keyboard
         api(token, "sendMessage", params, timeout=15)
@@ -2754,11 +2767,11 @@ def handle_message(token, admin_id, sessions, msg):
         return
     if text == "/list":
         sessions.pop(chat_id, None)
-        send(token, chat_id, run_cli(["--list"]), MAIN_KEYBOARD)
+        send(token, chat_id, run_cli(["--list"]), MAIN_KEYBOARD, code=True)
         return
     if text == "/status":
         sessions.pop(chat_id, None)
-        send(token, chat_id, run_cli(["--check"]), MAIN_KEYBOARD)
+        send(token, chat_id, run_cli(["--check"]), MAIN_KEYBOARD, code=True)
         return
 
     # Tombol menu utama -> mulai percakapan.
@@ -2771,10 +2784,10 @@ def handle_message(token, admin_id, sessions, msg):
     }
     if text in start and session is None:
         if text == "List Akun":
-            send(token, chat_id, run_cli(["--list"]), MAIN_KEYBOARD)
+            send(token, chat_id, run_cli(["--list"]), MAIN_KEYBOARD, code=True)
             return
         if text == "Status VPS":
-            send(token, chat_id, run_cli(["--check"]), MAIN_KEYBOARD)
+            send(token, chat_id, run_cli(["--check"]), MAIN_KEYBOARD, code=True)
             return
         kind = start[text]
         sessions[chat_id] = {"kind": kind, "step": 0, "data": {}}
@@ -2829,7 +2842,7 @@ def handle_message(token, admin_id, sessions, msg):
         # Selesai: jalankan aksi.
         sessions.pop(chat_id, None)
         result = FINISH[kind](session)
-        send(token, chat_id, result, MAIN_KEYBOARD)
+        send(token, chat_id, result, MAIN_KEYBOARD, code=True)
         return
 
     # Tidak dikenal -> tampilkan menu.

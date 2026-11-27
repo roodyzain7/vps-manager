@@ -187,6 +187,13 @@ output ditangkap program lain (mis. bot Telegram), tidak ada escape
 sequence yang ikut terkirim — pesan bot tetap bersih. Untuk akun trial,
 "Expired On" menampilkan tanggal + jam habisnya.
 
+**Bot Telegram menampilkan format yang sama.** Karena bot menjalankan
+CLI yang sama, hasil buat akun / link akun di bot juga format CEK AKUN.
+Bedanya, bot membungkus hasil CLI dalam blok monospace (`<pre>`) supaya
+kolomnya tetap sejajar — font Telegram biasa proporsional, jadi tanpa
+blok itu kolom Remarks / Port / UUID jadi tidak rapi. Prompt dan pesan
+konfirmasi bot tetap teks biasa.
+
 ## Features (menu 12)
 
 Submenu perbaikan dan utilitas, seperti menu FEATURES di screenshot
