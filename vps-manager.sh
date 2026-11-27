@@ -202,7 +202,7 @@ check_deps() {
 # -----------------------------------------------------------------------------
 # Validasi input (ketat — semua input user lewat sini)
 # -----------------------------------------------------------------------------
-valid_username() { [[ "$1" =~ ^[a-z_][a-z0-9_-]{2,31}$ ]]; }
+valid_username() { [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; }
 valid_domain()   { [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,61}[a-zA-Z0-9])?\.[a-zA-Z]{2,}$ ]]; }
 valid_email()    { [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; }
 valid_days()     { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 365 )); }
@@ -1701,7 +1701,7 @@ ask_days() {
 ask_name() { # $1=protokol — nama akun unik per protokol
     local proto="$1" name=""
     while true; do
-        name=$(read_validated "Nama akun (huruf kecil, angka, _ , - ; min 3 karakter): " valid_username "Nama tidak valid.")
+        name=$(read_validated "Nama akun (huruf kecil, angka, _ , - ; min 1 karakter): " valid_username "Nama tidak valid.")
         if state_account_exists "$proto" "$name"; then
             error "Akun ${proto}/${name} sudah ada. Pilih nama lain."
         else
@@ -1731,7 +1731,7 @@ create_ssh() {
         if [[ -t 0 ]]; then
             # Password SSH wajib diisi manual (tidak dibuat otomatis).
             while true; do
-                if ! read -r -s -p "Password SSH (wajib diisi, minimal 8 karakter): " password; then
+                if ! read -r -s -p "Password SSH (wajib diisi, minimal 1 karakter): " password; then
                     echo
                     error "Dibatalkan."
                     return 1
@@ -1739,8 +1739,8 @@ create_ssh() {
                 echo
                 if [[ -z "$password" ]]; then
                     warn "Password tidak boleh kosong — ketik password SSH."
-                elif ((${#password} < 8)); then
-                    warn "Password minimal 8 karakter."
+                elif ((${#password} < 1)); then
+                    warn "Password minimal 1 karakter."
                     password=""
                 else
                     break
@@ -1751,7 +1751,7 @@ create_ssh() {
             return 1
         fi
     fi
-    if ((${#password} < 8)); then error "Password minimal 8 karakter."; return 1; fi
+    if ((${#password} < 1)); then error "Password minimal 1 karakter."; return 1; fi
     local expiry
     expiry=$(expiry_iso "$days")
     # Buat user Linux: shell nologin (tidak bisa login shell interaktif),
@@ -2569,7 +2569,7 @@ BOT_CONF = os.environ.get("VPS_BOT_CONF", "/etc/vps-manager/bot.conf")
 VPS_MANAGER = os.environ.get("VPS_MANAGER_BIN", "/usr/local/bin/vps-manager")
 
 PROTOCOLS = ("ssh", "vmess", "vless", "trojan", "ss")
-USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{2,31}$")
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 MAIN_KEYBOARD = {
@@ -2736,10 +2736,10 @@ def cmd_renew(session):
 STEPS = {
     "create": [
         ("proto", "Pilih protokol akun yang dibuat:", PROTO_KEYBOARD),
-        ("name", "Nama akun? (huruf kecil, 3-32 karakter, contoh: aku)", None),
+        ("name", "Nama akun? (huruf kecil, 1-32 karakter, contoh: aku)", None),
         ("days", "Masa aktif berapa hari? (1-365, ketik 0 untuk 30 hari)", None),
         # Hanya ditanyakan bila protokol SSH (password SSH wajib manual).
-        ("password", "Password SSH? (minimal 8 karakter)", None),
+        ("password", "Password SSH? (minimal 1 karakter)", None),
     ],
     "show": [
         ("proto", "Link akun protokol apa?", PROTO_KEYBOARD),
@@ -2854,7 +2854,7 @@ def handle_message(token, admin_id, sessions, msg):
         elif field == "name":
             if not valid_name(value):
                 send(token, chat_id,
-                     "Nama tidak valid (huruf kecil, 3-32 karakter, "
+                     "Nama tidak valid (huruf kecil, 1-32 karakter, "
                      "diawali huruf/underscore). Coba lagi.")
                 return
         elif field == "days":
@@ -2866,9 +2866,9 @@ def handle_message(token, admin_id, sessions, msg):
                      "Hari harus angka 1-365. Coba lagi.")
                 return
         elif field == "password":
-            if len(value) < 8:
+            if len(value) < 1:
                 send(token, chat_id,
-                     "Password minimal 8 karakter. Coba lagi.")
+                     "Password minimal 1 karakter. Coba lagi.")
                 return
         elif field == "confirm":
             if value not in ("Ya, Hapus",):

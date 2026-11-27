@@ -336,7 +336,7 @@ bash vps-manager.sh --install --mode reality
 
 # Buat akun
 # Password SSH WAJIB diisi manual (tidak dibuat otomatis): di menu akan
-# ditanya sampai diisi (minimal 8 karakter); di bot ditanyakan juga;
+# ditanya sampai diisi (minimal 1 karakter); di bot ditanyakan juga;
 # non-interaktif tanpa --password akan ditolak.
 bash vps-manager.sh --create ssh    --name user1 --days 30 --password Rahasia123
 bash vps-manager.sh --create vmess  --name user1 --days 30 --limit-ip 2
