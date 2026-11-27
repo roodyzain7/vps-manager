@@ -1175,6 +1175,9 @@ setup_slowdns() {
     # 0.0.0.0 bila deteksi gagal; trafik ke IP publik diteruskan NAT.
     local bind_ip
     bind_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')
+    [[ -n "$bind_ip" ]] || bind_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    # JANGAN fallback ke 0.0.0.0: di Ubuntu, 0.0.0.0:53 bentrok dengan
+    # systemd-resolved (127.0.0.53:53) -> "bind: address already in use".
     [[ -n "$bind_ip" ]] || bind_ip="0.0.0.0"
     slowdns_build_dnstt || return 1
     slowdns_ensure_keys || return 1
