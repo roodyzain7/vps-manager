@@ -2994,8 +2994,8 @@ chk_ovpn_ssl() { svc_active openvpn-server@ssl openvpn@ssl || proc_on 'openvpn.*
 chk_ovpn_wsssl() { svc_active openvpn-server@ws-ssl openvpn@ws-ssl || proc_on 'openvpn.*ws'; }
 chk_ovpn_udp() { port_udp 1194; }
 chk_ovpn_tcp() { port_tcp 1194; }
-chk_ohp_ssh() { proc_on 'ohp.*ssh'; }
-chk_ohp_dropbear() { proc_on 'ohp.*dropbear'; }
+chk_ohp_ssh() { proc_on 'ohp.*ssh' || port_tcp 8181; }
+chk_ohp_dropbear() { proc_on 'ohp.*dropbear' || port_tcp 8282; }
 chk_ohp_ovpn() { proc_on 'ohp.*openvpn'; }
 chk_wsepro() { svc_active ws-epro && port_tcp 10090; }
 chk_badvpn7100() { port_udp 7100; }
