@@ -2590,7 +2590,10 @@ feat_change_dns() {
 }
 
 write_haproxy_conf() {
-    # Config HAProxy (8880 HTTP / 9444 TLS) untuk stack vps-manager saat ini:
+    # Config HAProxy multiport untuk stack vps-manager saat ini:
+    # frontend http-in listen di port yang sama seperti HAProxy ARISCTUNNEL
+    # (55, 8080, 8880, 2082, 2086, 2095 + rentang 222-1000), kecuali 80/443
+    # yang tetap dipegang Nginx (link lama tetap jalan).
     # backend langsung ke inbound Xray (VMess 10001, VLESS 10002, Trojan 10003)
     # dan ws-epro (SSH-WS 10090); https-in 9444 diteruskan ke Nginx :443.
     # Pola yang sama seperti menu lama v1.9.0 (terbukti jalan di VPS ini),
@@ -2611,6 +2614,12 @@ defaults
 
 frontend http-in
     bind *:8880
+    bind *:8080
+    bind *:2082
+    bind *:2086
+    bind *:2095
+    bind *:55
+    bind *:222-1000
     mode http
     acl is_vmess path_beg /vmess
     acl is_vless path_beg /vless
@@ -2669,18 +2678,24 @@ setup_haproxy() {
     if command -v ufw >/dev/null 2>&1; then
         ufw allow 8880/tcp 2>/dev/null || true
         ufw allow 9444/tcp 2>/dev/null || true
+        ufw allow 8080/tcp 2>/dev/null || true
+        ufw allow 2082/tcp 2>/dev/null || true
+        ufw allow 2086/tcp 2>/dev/null || true
+        ufw allow 2095/tcp 2>/dev/null || true
+        ufw allow 55/tcp 2>/dev/null || true
+        ufw allow 222:1000/tcp 2>/dev/null || true
     fi
     systemctl enable haproxy 2>/dev/null || true
     systemctl restart haproxy
     sleep 2
     if systemctl is-active --quiet haproxy; then
-        info "HAProxy jalan (8880 HTTP, 9444 TLS)."
+        info "HAProxy jalan (multiport: 55, 8080, 8880, 2082, 2086, 2095, 222-1000 HTTP + 9444 TLS)."
     else
         error "HAProxy gagal jalan:"
         journalctl -u haproxy -n 20 --no-pager 2>/dev/null || true
         return 1
     fi
-    ss -tlnp 2>/dev/null | grep -E ':8880|:9444' || warn "Port 8880/9444 belum LISTEN."
+    ss -tlnp 2>/dev/null | grep -E ':8880|:9444|:8080|:2082|:55' || warn "Port HAProxy belum LISTEN."
 }
 
 feat_fix_haproxy() {
@@ -2700,14 +2715,14 @@ feat_fix_haproxy() {
     if systemctl is-active --quiet haproxy; then
         info "HAProxy jalan."
         echo "--- Backend (harus UP bila Xray/ws-epro/Nginx jalan) ---"
-        echo "  8880 -> VMess 10001 / VLESS 10002 / Trojan 10003 / SSH-WS 10090"
+        echo "  55, 8080, 8880, 2082, 2086, 2095, 222-1000 -> VMess 10001 / VLESS 10002 / Trojan 10003 / SSH-WS 10090"
         echo "  9444 -> Nginx :443 (TLS)"
     else
         error "HAProxy gagal jalan:"
         journalctl -u haproxy -n 20 --no-pager 2>/dev/null || true
         return 1
     fi
-    ss -tlnp 2>/dev/null | grep -E ':8880|:9444' || warn "Port 8880/9444 belum LISTEN."
+    ss -tlnp 2>/dev/null | grep -E ':8880|:9444|:8080|:2082|:55' || warn "Port HAProxy belum LISTEN."
 }
 feat_fix_nginx() {
     echo "=== Fixx Nginx ==="

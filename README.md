@@ -138,7 +138,9 @@ MENU FIXX
   9.) Change DNS Server        (ganti resolver, mis. 1.1.1.1 / 8.8.8.8)
  10.) Fixx Haproxy             (install bila belum ada + config backend ke
                                 Xray 10001-10003 / ws-epro 10090 / Nginx 443,
-                                lalu restart; port 8880 HTTP + 9444 TLS)
+                                lalu restart; multiport seperti ARISCTUNNEL:
+                                55, 8080, 8880, 2082, 2086, 2095, 222-1000
+                                HTTP + 9444 TLS; 80/443 tetap milik Nginx)
  11.) Fixx Nginx               (nginx -t, bangun ulang config bila rusak,
                                 restart, cek port 80/443)
  12.) Fixx WS ePRO             (install ulang bila belum terpasang, cek modul
@@ -168,9 +170,10 @@ OTHER
 
 Catatan jujur: item 9 di screenshot aslinya "Change Domain NS" (untuk
 SlowDNS) — script ini tidak memakai SlowDNS, jadi item itu diganti Change
-DNS Server (resolver). Item 10 Fixx Haproxy hanya berlaku bila HAProxy
-memang terpasang dari install lama; instalasi vps-manager sendiri memakai
-Nginx di port 80/443 dan tidak butuh HAProxy.
+DNS Server (resolver). Item 10 Fixx Haproxy memasang HAProxy multiport
+(port 55, 8080, 8880, 2082, 2086, 2095 + rentang 222-1000, sama seperti
+HAProxy ARISCTUNNEL) dengan backend ke Xray/ws-epro/Nginx; port 80/443
+tetap dipegang Nginx, jadi link lama tidak berubah.
 
 ## Perintah non-interaktif (otomasi)
 
