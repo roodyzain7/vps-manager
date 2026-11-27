@@ -808,7 +808,7 @@ issue_cert() {
 # -----------------------------------------------------------------------------
 write_nginx_conf() {
     # Nginx TIDAK lagi memegang 80/443 — HAProxy yang menghadap internet
-    # (terminasi TLS + deteksi SSH mentah). Nginx hanya satu server HTTP di
+    # (terminasi TLS). Nginx hanya satu server HTTP di
     # localhost:18080, melayani yang diteruskan HAProxy:
     # WS (/vmess, /vless, /trojan, /ss), SSH-WS (/ssh-ws dan root "/" tanpa
     # path), /vps-manager.sh, ACME challenge, dan root 200 OK.
@@ -1627,7 +1627,7 @@ do_install() {
             systemctl start nginx 2>/dev/null || systemctl reload nginx
             # Jembatan SSH WS (wajib supaya /ssh-ws di port 80 & 443 benar-benar jalan).
             setup_ws_epro || true
-            # HAProxy ambil alih 80/443 (SSH mentah + WS sama-sama jalan).
+            # HAProxy ambil alih 80/443 (SSH-WS + Xray).
             # Harus sesudah Nginx pindah ke port internal (write_nginx_conf di
             # atas) supaya 80/443 sudah bebas saat HAProxy bind.
             setup_haproxy || warn "HAProxy gagal dipasang — 80/443 belum pindah (coba menu 12 -> 10 Fixx Haproxy)."
@@ -3578,17 +3578,18 @@ haproxy_sync_cert() {
 
 write_haproxy_conf() {
     # Config HAProxy: ambil alih 80/443 dari Nginx (mode domain + sertifikat).
-    # Pola deteksi protokol (SSH mentah vs HTTP/WebSocket) mengikuti cara
-    # WibuTunnel: inspect payload pertama koneksi.
-    # - Port 80 (TCP): payload "SSH-" -> OpenSSH 22; path Xray WS -> hub;
-    #   sisanya -> Nginx internal (SSH-WS root//ssh-ws, /vps-manager.sh, root).
-    # - Port 443 + 9444 (TCP, terminasi TLS): setelah dekripsi, "SSH-" ->
-    #   OpenSSH 22; ALPN h2 (gRPC) atau path Xray -> hub; sisanya -> Nginx.
+    # Fokus ke tunneling SSH WebSocket + Xray saja — SSH mentah TIDAK
+    # diikutkan di 80/443 (SSH mentah hanya untuk login terminal, lewat
+    # port 22). Tidak ada deteksi payload "SSH-" di sini.
+    # - Port 80 (TCP): path Xray WS -> hub; sisanya -> Nginx internal
+    #   (SSH-WS root//ssh-ws, /vps-manager.sh, root).
+    # - Port 443 + 9444 (TCP, terminasi TLS): ALPN h2 (gRPC) atau path
+    #   Xray -> hub; sisanya -> Nginx.
     # - Hub (127.0.0.1:8444, HTTP): route WS + gRPC ke inbound Xray.
     # - Multiport lama (8880, 8080, 2082, 2086, 2095, 55, 222-442 + 444-1000)
     #   tetap jalan seperti sebelumnya.
     # - Mode REALITY (tanpa sertifikat): frontend 443/9444 dilewati, Xray
-    #   REALITY tetap memegang 443; port 80 tetap dideteksi SSH-nya.
+    #   REALITY tetap memegang 443.
     # TIDAK pakai PROXY protocol (send-proxy-v2): Xray vps-manager tidak
     # mengaktifkan acceptProxyProtocol dan Nginx tidak mengirimnya — kalau
     # diaktifkan, rantai Nginx/Xray rusak. Xray melihat IP HAProxy (127.0.0.1).
@@ -3620,13 +3621,10 @@ frontend port80
     mode tcp
     timeout client 30m
     tcp-request inspect-delay 5s
-    tcp-request content accept if { req.payload(0,4) -m str SSH- }
     tcp-request content accept if HTTP
-    acl is_raw_ssh req.payload(0,4) -m str SSH-
     acl is_sshws path_beg /ssh-ws
     acl is_xray path_beg /vmess /vless /trojan /ss
     acl is_xray path_beg %2Fvmess %2Fvless %2Ftrojan %2Fss
-    use_backend ssh_raw if is_raw_ssh
     use_backend nginx_internal if is_sshws
     use_backend bk_hub if is_xray
     default_backend nginx_internal
@@ -3640,14 +3638,11 @@ frontend port443
     mode tcp
     timeout client 30m
     tcp-request inspect-delay 5s
-    tcp-request content accept if { req.payload(0,4) -m str SSH- }
     tcp-request content accept if HTTP
-    acl is_raw_ssh req.payload(0,4) -m str SSH-
     acl is_h2 ssl_fc_alpn -i h2
     acl is_sshws path_beg /ssh-ws
     acl is_xray path_beg /vmess /vless /trojan /ss
     acl is_xray path_beg %2Fvmess %2Fvless %2Ftrojan %2Fss
-    use_backend ssh_raw if is_raw_ssh
     use_backend nginx_internal if is_sshws
     use_backend bk_hub if is_h2
     use_backend bk_hub if is_xray
@@ -3656,11 +3651,6 @@ frontend port443
 HAPROXYEOF
     fi
     cat >> /etc/haproxy/haproxy.cfg <<HAPROXYEOF
-backend ssh_raw
-    mode tcp
-    timeout server 30m
-    server openssh 127.0.0.1:22 check inter 5s fall 3 rise 2
-
 # Backend perantara ke hub (TCP murni — meneruskan byte mentah ke listen
 # hub_xray di 127.0.0.1:8444; hub yang mengurai HTTP/HTTP-2 dan route by path).
 # JANGAN use_backend langsung ke listen: HAProxy mengembalikan 503
@@ -3895,7 +3885,7 @@ haproxy_fix_bind() {
 
 setup_haproxy() {
     # Install HAProxy + config + nyalakan. Dipanggil dari menu 1 (mode domain)
-    # dan Features 10. HAProxy kini memegang 80/443 (SSH mentah + WS).
+    # dan Features 10. HAProxy kini memegang 80/443 (SSH-WS + Xray).
     if ! command -v haproxy >/dev/null 2>&1; then
         info "Menginstall HAProxy..."
         fix_dns
@@ -3952,7 +3942,7 @@ setup_haproxy() {
     systemctl restart haproxy
     sleep 2
     if haproxy_is_up; then
-        info "HAProxy jalan (80/443: SSH mentah + WS; multiport: 55, 8080, 8880, 2082, 2086, 2095, 222-442 + 444-1000 HTTP + 9444 TLS)."
+        info "HAProxy jalan (80/443: SSH-WS + Xray; multiport: 55, 8080, 8880, 2082, 2086, 2095, 222-442 + 444-1000 HTTP + 9444 TLS)."
         # Nginx (internal 18080) harus jalan lagi bila tadi di-stop untuk
         # membebaskan 80/443.
         systemctl start nginx 2>/dev/null || true
@@ -4550,29 +4540,6 @@ menu_loop() {
 #   000 = Nginx/TLS mati atau port 443 tidak bisa dijangkau
 # Selalu return 0 (hanya laporan, tidak menggagalkan install).
 # -----------------------------------------------------------------------------
-ssh_raw_check() {
-    # Uji SSH mentah lewat HAProxy: kirim banner klien "SSH-2.0-...", baca
-    # banner server. Return 0 bila banner "SSH-" diterima (HAProxy mendeteksi
-    # payload dan meneruskan ke OpenSSH 22).
-    # Port 443/9444 adalah TLS: bungkus dulu dengan openssl s_client, lalu
-    # kirim banner SSH di dalam channel terenkripsi.
-    local port="$1"
-    local resp=""
-    if [[ "$port" == "443" || "$port" == "9444" ]]; then
-        command -v openssl >/dev/null 2>&1 || return 1
-        local dom
-        dom=$(state_get '.install.domain // "localhost"')
-        resp=$( (printf 'SSH-2.0-vps-manager-check\r\n'; sleep 1) | timeout 6 openssl s_client -connect 127.0.0.1:"$port" -servername "$dom" -quiet 2>/dev/null | head -c 40 || true )
-        [[ "$resp" == SSH-* ]]
-        return $?
-    fi
-    exec 3<>/dev/tcp/127.0.0.1/"$port" 2>/dev/null || return 1
-    printf 'SSH-2.0-vps-manager-check\r\n' >&3
-    IFS= read -r -t 5 resp <&3 || true
-    exec 3<&- 3>&- 2>/dev/null || true
-    [[ "$resp" == SSH-* ]]
-}
-
 do_check() {
     echo "=== Cek rantai koneksi (vps-manager --check) ==="
     local mode domain ok=1
@@ -4587,7 +4554,7 @@ do_check() {
     if systemctl is-active --quiet haproxy 2>/dev/null; then
         info "HAProxy: berjalan (memegang 80/443)"
     else
-        error "HAProxy: TIDAK berjalan — SSH mentah + WS di 80/443 tidak jalan (coba menu 12 -> 10)"
+        error "HAProxy: TIDAK berjalan — SSH-WS + Xray di 80/443 tidak jalan (coba menu 12 -> 10)"
         ok=0
     fi
     if port_tcp 443; then
@@ -4601,18 +4568,6 @@ do_check() {
     else
         error "Port 80: tidak ada yang mendengarkan"
         ok=0
-    fi
-    if ssh_raw_check 80; then
-        info "SSH mentah port 80: OK (banner SSH diterima — ssh -p 80 jalan)"
-    else
-        warn "SSH mentah port 80: belum terdeteksi (kirim banner SSH, baca balasan)"
-    fi
-    if [[ "$mode" == "domain" ]]; then
-        if ssh_raw_check 443; then
-            info "SSH mentah port 443: OK (banner SSH diterima — ssh via TLS/SNI jalan)"
-        else
-            warn "SSH mentah port 443: belum terdeteksi (uji manual: ssh -p 443)"
-        fi
     fi
     if systemctl is-active --quiet xray 2>/dev/null; then
         info "Xray: berjalan"
