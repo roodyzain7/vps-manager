@@ -2987,6 +2987,20 @@ haproxy_status_diag() {
     info "Status unit haproxy: ${st} | Port 8880: $(port_tcp 8880 && echo LISTEN || echo TIDAK-LISTEN) | Port 9444: $(port_tcp 9444 && echo LISTEN || echo TIDAK-LISTEN)"
 }
 
+haproxy_config_diag() {
+    # Bila service aktif tapi tidak ada port yang LISTEN, penyebabnya hampir
+    # pasti di file config yang dibaca service (bukan di prosesnya): tampilkan
+    # (a) berapa baris bind di config yang ditulis script, (b) CONFIG +
+    # ExecStart dari unit (bila unit memakai file lain, di sinilah ketahuan),
+    # (c) semua listener yang benar-benar dipegang proses haproxy.
+    local nbind nlisten
+    nbind=$(grep -c "^[[:space:]]*bind" /etc/haproxy/haproxy.cfg 2>/dev/null || true); nbind=${nbind:-0}
+    nlisten=$(ss -tlnp 2>/dev/null | grep -c "haproxy" || true); nlisten=${nlisten:-0}
+    info "Config /etc/haproxy/haproxy.cfg: ${nbind} baris bind | Listener haproxy (ss): ${nlisten}"
+    systemctl cat haproxy 2>/dev/null | grep -E "CONFIG=|ExecStart" | head -n 4 | while IFS= read -r l; do info "Unit: ${l}"; done
+    ss -tlnp 2>/dev/null | grep "haproxy" | head -n 5 | while IFS= read -r l; do info "ss: ${l}"; done
+}
+
 haproxy_apply_limits() {
     # Naikkan batas file descriptor service HAProxy via drop-in systemd, agar
     # maxconn + ~790 listener tidak mentok di batas default. Aman bila systemd
@@ -3028,6 +3042,7 @@ haproxy_fix_bind() {
         if [[ -z "$port" ]]; then
             error "HAProxy gagal jalan. Isi journal terakhir (penyebab aslinya ada di sini):"
             printf '%s\n' "$jlog" | tail -n 12 >&2 || true
+            haproxy_config_diag
             error "Bila masih belum jelas, cek manual: journalctl -u haproxy -n 30"
             return 1
         fi
@@ -3107,6 +3122,14 @@ feat_fix_haproxy() {
         write_haproxy_conf
         haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5 || { error "Config baru tetap tidak valid."; return 1; }
     fi
+    # Config valid tapi tanpa baris bind = service jalan tanpa mendengarkan
+    # apa-apa (persis gejala 27 Nov 2026: active, worker forked, 0 listener).
+    # Ini terjadi bila file config tertimpa/berbeda — tulis ulang dari template.
+    if [[ $(grep -c "^[[:space:]]*bind" /etc/haproxy/haproxy.cfg 2>/dev/null || true) -eq 0 ]]; then
+        warn "Config HAProxy tidak punya baris bind sama sekali — menulis ulang dari template vps-manager..."
+        write_haproxy_conf
+        haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5 || { error "Config baru tetap tidak valid."; return 1; }
+    fi
     haproxy_apply_limits
     systemctl restart haproxy
     sleep 2
@@ -3117,6 +3140,7 @@ feat_fix_haproxy() {
         echo "  9444 -> Nginx :443 (TLS)"
     else
         haproxy_status_diag
+        haproxy_config_diag
         haproxy_fix_bind
         return $?
     fi
