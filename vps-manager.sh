@@ -2172,6 +2172,17 @@ osc52_copy() { # $1=teks — salin ke clipboard terminal via OSC 52.
     return 0
 }
 
+trial_expiry_display() { # $1=proto $2=name $3=expiry-tanggal — datetime trial bila trial, else tanggal.
+    local proto="$1" name="$2" exp="$3"
+    local until_epoch
+    until_epoch=$(jq -r --arg p "$proto" --arg n "$name" '.accounts[] | select(.protocol==$p and .name==$n) | (.trial_until // 0)' "$STATE_FILE")
+    if [[ "$until_epoch" != "0" && -n "$until_epoch" ]]; then
+        date -d "@${until_epoch}" '+%F %T'
+    else
+        printf '%s' "$exp"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # Tampilkan link/config
 # -----------------------------------------------------------------------------
@@ -2206,16 +2217,26 @@ show_link() {
     local link="" link_nontls="" link_grpc=""
     case "$proto" in
         ssh)
-            local exp
+            local exp geo city isp exp_disp
             exp=$(jq -r --arg n "$name" '.accounts[] | select(.protocol=="ssh" and .name==$n) | .expiry' "$STATE_FILE")
-            echo "================= AKUN SSH: ${name} ================="
-            echo "  Host     : ${addr}"
-            echo "  Port     : 22"
-            echo "  Username : ${name}"
-            echo "  Password : (sudah ditampilkan sekali saat dibuat — bila lupa, reset manual: passwd ${name})"
-            echo "  Expired  : ${exp}"
-            echo "  SSH WS   : ${addr}:80 dan ${addr}:443 (path /ssh-ws, via ws-epro)"
-            echo "  Perintah : ssh ${name}@${addr}"
+            exp_disp=$(trial_expiry_display "ssh" "$name" "$exp")
+            geo=$(server_geo); city="${geo%%|*}"; isp="${geo##*|}"
+            echo "SSH - CEK AKUN"
+            echo "----------------------------------------"
+            echo "Remarks    : ${name}"
+            echo "Domain     : ${addr}"
+            echo "ISP        : ${isp}"
+            echo "City       : ${city}"
+            echo "Expired On : ${exp_disp}"
+            echo "----------------------------------------"
+            echo "CONFIG DETAILS"
+            echo "Host       : ${addr}"
+            echo "Port       : 22"
+            echo "Username   : ${name}"
+            echo "Password   : (sudah ditampilkan sekali saat dibuat — bila lupa, reset manual: passwd ${name})"
+            echo "SSH WS     : ${addr}:80 dan ${addr}:443 (path /ssh-ws, via ws-epro)"
+            echo "Perintah   : ssh ${name}@${addr}"
+            echo "----------------------------------------"
             return 0
             ;;
         vmess)
@@ -2294,24 +2315,93 @@ show_link() {
             ;;
     esac
 
-    echo "================= LINK ${proto^^}: ${name} ================="
-    echo "[1] TLS (port 443):"
+    # ---- Tampilan CEK AKUN (format simpel, seperti referensi) ----
+    local exp geo city isp exp_disp proto_label link_label_main
+    exp=$(jq -r --arg p "$proto" --arg n "$name" '.accounts[] | select(.protocol==$p and .name==$n) | .expiry' "$STATE_FILE")
+    exp_disp=$(trial_expiry_display "$proto" "$name" "$exp")
+    geo=$(server_geo); city="${geo%%|*}"; isp="${geo##*|}"
+    proto_label="${proto^^}"
+    [[ "$proto" == "ss" ]] && proto_label="SHADOWSOCKS"
+    echo "${proto_label} - CEK AKUN"
+    echo "----------------------------------------"
+    echo "Remarks    : ${name}"
+    echo "Domain     : ${addr}"
+    echo "ISP        : ${isp}"
+    echo "City       : ${city}"
+    echo "Expired On : ${exp_disp}"
+    echo "----------------------------------------"
+    echo "CONFIG DETAILS"
+    case "$proto" in
+        vmess)
+            echo "Port TLS   : 443"
+            echo "Port NTLS  : 80"
+            echo "UUID       : ${uuid}"
+            echo "AlterId    : 0"
+            echo "Security   : auto"
+            echo "Network    : ws, grpc"
+            echo "Path WS    : ${vmess_path}"
+            echo "Serv.Name  : vmess-grpc"
+            ;;
+        vless)
+            if [[ "$transport" == "tcp" || "$mode" == "reality" ]]; then
+                echo "Port       : 443"
+                echo "UUID       : ${uuid}"
+                echo "Flow       : xtls-rprx-vision"
+                echo "Security   : reality"
+                echo "Network    : tcp"
+                echo "SNI        : ${sni}"
+            else
+                echo "Port TLS   : 443"
+                echo "Port NTLS  : 80"
+                echo "UUID       : ${uuid}"
+                echo "Security   : tls"
+                echo "Network    : ws, grpc"
+                echo "Path WS    : ${vless_path}"
+                echo "Serv.Name  : vless-grpc"
+            fi
+            ;;
+        trojan)
+            echo "Port TLS   : 443"
+            echo "Port NTLS  : 80"
+            echo "Password   : ${pw}"
+            echo "Security   : tls"
+            echo "Network    : ws, grpc"
+            echo "Path WS    : ${trojan_path}"
+            echo "Serv.Name  : trojan-grpc"
+            ;;
+        ss)
+            echo "Port TLS   : 443"
+            echo "Port NTLS  : 80"
+            echo "Password   : ${pw}"
+            echo "Method     : ${method}"
+            echo "Network    : ws, grpc"
+            echo "Path WS    : /ss"
+            echo "Serv.Name  : ss-grpc"
+            ;;
+    esac
+    echo "----------------------------------------"
+    link_label_main="LINK ${proto_label} WS TLS"
+    if [[ "$proto" == "vless" ]] && { [[ "$transport" == "tcp" ]] || [[ "$mode" == "reality" ]]; }; then
+        link_label_main="LINK VLESS REALITY"
+    elif [[ "$mode" != "domain" ]]; then
+        link_label_main="LINK ${proto_label} WS"
+    fi
+    echo "${link_label_main}"
     echo "$link"
     if osc52_copy "$link"; then
-        echo "(Link [1] sudah disalin ke clipboard — tinggal paste di aplikasi VPN.)"
+        echo "(Link di atas sudah disalin ke clipboard — tinggal paste di aplikasi VPN.)"
     fi
     if [[ -n "$link_nontls" ]]; then
         echo
-        echo "[2] Non-TLS (port 80):"
+        echo "LINK ${proto_label} WS NO TLS"
         echo "$link_nontls"
     fi
     if [[ -n "$link_grpc" ]]; then
         echo
-        echo "[3] gRPC (port 443):"
+        echo "LINK ${proto_label} GRPC"
         echo "$link_grpc"
     fi
-    echo
-    echo "Import ke v2rayNG / NekoBox / Streisand / FoXray."
+    echo "----------------------------------------"
 }
 
 # -----------------------------------------------------------------------------

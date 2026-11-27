@@ -141,32 +141,51 @@ untuk SSH user Linux-nya ikut dihapus. Di menu 6 (List) akun trial ditandai
 `(TRIAL, sisa 25 mnt)`. Bila trial diperpanjang di menu 8, ia berubah jadi
 akun biasa (penanda trial hilang).
 
-## Link akun: TLS + Non-TLS + gRPC, salin otomatis
+## Link akun: format CEK AKUN, salin otomatis
 
-Menu 9 (Link Akun) dan hasil buat akun menampilkan tiga link bernomor
-untuk VMess / VLESS / Trojan / Shadowsocks (mode domain):
+Menu 9 (Link Akun) dan hasil buat akun menampilkan akun dalam format
+CEK AKUN yang simpel (VMess / VLESS / Trojan / Shadowsocks / SSH):
 
 ```
-================= LINK VMESS: aku =================
-[1] TLS (port 443):
+VMESS - CEK AKUN
+----------------------------------------
+Remarks    : lut
+Domain     : sg1.roodyzain.web.id
+ISP        : Tencent Cloud
+City       : Singapore
+Expired On : 2026-12-27
+----------------------------------------
+CONFIG DETAILS
+Port TLS   : 443
+Port NTLS  : 80
+UUID       : a3d57954-969b-4e62-b7e3-fcf5018f537a
+AlterId    : 0
+Security   : auto
+Network    : ws, grpc
+Path WS    : /vmess
+Serv.Name  : vmess-grpc
+----------------------------------------
+LINK VMESS WS TLS
 vmess://...
 
-(Link [1] sudah disalin ke clipboard — tinggal paste di aplikasi VPN.)
+(Link di atas sudah disalin ke clipboard — tinggal paste di aplikasi VPN.)
 
-[2] Non-TLS (port 80):
+LINK VMESS WS NO TLS
 vmess://...
 
-[3] gRPC (port 443):
+LINK VMESS GRPC
 vmess://...
+----------------------------------------
 ```
 
-Link **[1] TLS otomatis disalin ke clipboard** lewat OSC 52 begitu
+Link **WS TLS otomatis disalin ke clipboard** lewat OSC 52 begitu
 ditampilkan — di Termius tinggal paste di v2rayNG / NekoBox / Streisand /
 FoXray, tanpa perlu menandai teks panjangnya. (Bila belum tersalin,
 aktifkan OSC 52 di Termius: Settings → Terminal → Sequences → OSC 52.)
-Link [2] dan [3] tetap bisa disalin manual dengan tekan lama. Saat output
-ditangkap program lain (mis. bot Telegram), tidak ada escape sequence yang
-ikut terkirim — pesan bot tetap bersih.
+Link NO TLS dan GRPC tetap bisa disalin manual dengan tekan lama. Saat
+output ditangkap program lain (mis. bot Telegram), tidak ada escape
+sequence yang ikut terkirim — pesan bot tetap bersih. Untuk akun trial,
+"Expired On" menampilkan tanggal + jam habisnya.
 
 ## Features (menu 12)
 
