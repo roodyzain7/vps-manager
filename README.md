@@ -31,9 +31,10 @@ Lalu pilih menu **1) Install/Update dependensi & Xray** dan pilih mode:
 
 - **1) Domain + TLS** — butuh domain yang A record-nya sudah mengarah ke IP VPS,
   dan email untuk Let's Encrypt. Sertifikat diterbitkan otomatis via acme.sh
-  (standalone, EC-256). **HAProxy memegang port 80 dan 443**: path
-  Xray diteruskan ke hub internal, sisanya ke Nginx (SSH-WS, root,
-  dan /vps-manager.sh). Nginx kini
+  (standalone, EC-256). **HAProxy memegang port 80 dan 443** (pola
+  WibuTunnel): ia mendeteksi protokol dari payload pertama koneksi —
+  `SSH-` diteruskan ke OpenSSH 22 (SSH mentah jalan di 80 & 443!),
+  path Xray diteruskan ke hub internal, sisanya ke Nginx. Nginx kini
   hanya melayani dari localhost:18080 (tanpa TLS). VMess/VLESS/Trojan/SSH
   tetap di **dua port**: **80 non-TLS** dan **443 TLS**, dengan path tetap
   `/vmess`, `/vless`, `/trojan`, dan `/ssh-ws` (SSH WS via jembatan
@@ -225,11 +226,11 @@ jadi setting-nya tampil sebagai `host:port@name` saja. Jalurnya sudah
 disiapkan script: Nginx meneruskan handshake WebSocket di root `/`
 (tanpa path) **dan** di `/ssh-ws` — di port 80 maupun 443 — ke
 jembatan ws-epro (`127.0.0.1:10090`) → SSH port 22. HTTP biasa di
-root tetap 200 OK di kedua port. **SSH mentah hanya untuk login
-terminal, lewat port 22** (`ssh user@domain`) — tidak lagi di
-port 80/443, supaya 80/443 fokus ke tunneling SSH WebSocket.
-Cek SSH-WS dengan `vps-manager --check` (baris "SSH-WS / dan
-/ssh-ws port 80/443").
+root tetap 200 OK di kedua port. **SSH mentah kini juga jalan di
+port 80 dan 443** (HAProxy mendeteksi `SSH-` dan meneruskan ke
+OpenSSH 22), jadi `ssh -p 80 user@domain` dan `ssh -p 443 user@domain`
+bisa dipakai dari terminal — tidak hanya port 22. Cek dengan
+`vps-manager --check` (ada baris "SSH mentah port 80/443").
 
 **Bot Telegram menampilkan format yang sama.** Karena bot menjalankan
 CLI yang sama, hasil buat akun / link akun di bot juga format CEK AKUN.
@@ -317,8 +318,8 @@ SlowDNS) — script ini tidak memakai SlowDNS, jadi item itu diganti Change
 DNS Server (resolver). Item 10 Fixx Haproxy memasang HAProxy multiport
 (port 55, 8080, 8880, 2082, 2086, 2095 + rentang 222-1000, sama seperti
 HAProxy ARISCTUNNEL) dengan backend ke Xray/ws-epro/Nginx; **sejak
-27 Nov 2026 HAProxy juga memegang port 80/443** (SSH-WS + Xray)
-dan Nginx pindah ke localhost:18080, jadi link lama
+27 Nov 2026 HAProxy juga memegang port 80/443** (SSH mentah + WS,
+pola WibuTunnel) dan Nginx pindah ke localhost:18080, jadi link lama
 tidak berubah. Rentang ditulis 222-442 + 444-1000 (bukan 222-1000),
 karena 443 ada di dalam rentang itu dan kini dipegang frontend 443
 HAProxy sendiri — frontend multiport yang mencoba bind 443 akan gagal
