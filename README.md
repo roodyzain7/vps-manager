@@ -359,10 +359,11 @@ OTHER
                                 Klien: aplikasi SlowDNS / HTTP Custom
                                 mode SlowDNS. Implementasi sendiri —
                                 TIDAK pakai file dari zip SLOWDNSWIBU.
-                                Hasil buat/lihat akun VMess, VLESS dan
-                                Trojan otomatis mencantumkan Nameserver
-                                + Public Key SlowDNS (bila terpasang),
-                                jadi langsung bisa dipakai mode SlowDNS.)
+                                Hasil buat/lihat akun SSH, VMess, VLESS
+                                dan Trojan otomatis mencantumkan
+                                Nameserver + Public Key SlowDNS (bila
+                                terpasang), jadi langsung bisa dipakai
+                                mode SlowDNS.)
   x . EXIT
 ```
 

@@ -3204,6 +3204,8 @@ show_link() {
                 echo "SSH WEBSOCKET : ${addr}:80@${name}"
                 echo "SSH SSL       : ${addr}:443@${name}"
             fi
+            # SSH juga bisa lewat SlowDNS: cantumkan Nameserver + Public Key.
+            slowdns_client_block
             echo "----------------------------------------"
             return 0
             ;;
