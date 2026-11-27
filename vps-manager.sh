@@ -66,6 +66,14 @@ readonly PORT_XRAY_API=10085
 readonly NGINX_INTERNAL_PORT=18080
 readonly HAPROXY_HUB_PORT=8444
 readonly HAPROXY_PEM="/etc/haproxy/hap.pem"
+# OpenVPN WS-SSL: server TCP 1194 (publik, fallback klien standar) +
+# jembatan WebSocket ws-ovpn 127.0.0.1:10091 -> 127.0.0.1:1194,
+# diekspos Nginx lewat location /ovpn (port 80 + 443).
+readonly OVPN_SERVER_PORT=1194
+readonly OVPN_WS_PORT=10091
+readonly OVPN_SUBNET="10.9.0.0"
+readonly OVPN_DIR="/etc/openvpn/server"
+readonly OVPN_WS_DIR="/opt/ws-ovpn"
 
 # Warna terminal
 readonly C_RESET='\033[0m'
@@ -884,6 +892,15 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
     }
+    # OpenVPN over WebSocket via jembatan ws-ovpn (127.0.0.1:10091 -> OpenVPN 1194).
+    # Klien WS-SSL handshake ke /ovpn (port 80 non-TLS dan 443 TLS).
+    location /ovpn {
+        proxy_pass http://127.0.0.1:10091;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+    }
 
     # Link PERMANEN script ini (permintaan user — tidak ada expired):
     # https://<domain>/vps-manager.sh menyajikan file /usr/local/bin/vps-manager
@@ -1534,6 +1551,370 @@ EOF
     return 0
 }
 
+
+# -----------------------------------------------------------------------------
+# OpenVPN WS-SSL (service "OpenVPN WS-SSL" di Running Service).
+# Server OpenVPN (TCP 1194, tun 10.9.0.0/24) + jembatan WebSocket ws-ovpn
+# (127.0.0.1:10091 -> 127.0.0.1:1194) + Nginx location /ovpn (80 + 443).
+# PKI dibuat sendiri dengan openssl (tanpa easy-rsa): CA + server + tls-crypt
+# + database openssl ca (untuk sign klien + revoke + CRL).
+# Klien WS-SSL: WebSocket ke https://<domain>/ovpn (port 443) — butuh klien
+# yang mendukung OpenVPN-over-WebSocket. Klien standar (OpenVPN Connect
+# dkk) pakai remote <domain> 1194 TCP langsung (fallback, sudah termasuk
+# di file .ovpn sebagai remote kedua).
+# -----------------------------------------------------------------------------
+ovpn_ensure_websockets() {
+    # Jembatan ws-ovpn butuh modul websockets >= 10.0 (alasan sama seperti
+    # ws-epro: 9.x dari apt tidak kompatibel Python 3.10+).
+    if python3 -c "import websockets; v=tuple(map(int, websockets.__version__.split('.')[:2])); exit(0 if v>=(10,0) else 1)" 2>/dev/null; then
+        return 0
+    fi
+    info "Menginstall/upgrade modul websockets ke >= 10.0 (untuk jembatan OpenVPN WS)..."
+    if timeout 120 pip3 install --break-system-packages -U websockets 2>/dev/null || timeout 120 pip3 install -U websockets 2>/dev/null; then
+        return 0
+    fi
+    warn "Gagal install websockets — jembatan OpenVPN WS tidak akan jalan."
+    return 1
+}
+
+ovpn_setup_pki() {
+    mkdir -p "$OVPN_DIR/ca-db" /etc/openvpn/clients
+    # CA (10 tahun).
+    if [[ ! -f "$OVPN_DIR/ca.crt" ]]; then
+        info "Membuat CA OpenVPN..."
+        openssl req -x509 -newkey rsa:2048 -keyout "$OVPN_DIR/ca.key" -out "$OVPN_DIR/ca.crt" -days 3650 -nodes -subj "/CN=OpenVPN-CA" 2>/dev/null || { error "Gagal membuat CA OpenVPN."; return 1; }
+        chmod 600 "$OVPN_DIR/ca.key"
+    fi
+    # Database openssl ca (sign + revoke + CRL).
+    [[ -f "$OVPN_DIR/ca-db/index.txt" ]] || touch "$OVPN_DIR/ca-db/index.txt"
+    [[ -f "$OVPN_DIR/ca-db/serial" ]] || echo "1000" > "$OVPN_DIR/ca-db/serial"
+    [[ -f "$OVPN_DIR/ca-db/crlnumber" ]] || echo "1000" > "$OVPN_DIR/ca-db/crlnumber"
+    if [[ ! -f "$OVPN_DIR/ca.cnf" ]]; then
+        cat > "$OVPN_DIR/ca.cnf" <<'EOF'
+[ ca ]
+default_ca = CA_default
+[ CA_default ]
+dir = /etc/openvpn/server/ca-db
+database = $dir/index.txt
+new_certs_dir = $dir
+serial = $dir/serial
+crlnumber = $dir/crlnumber
+certificate = /etc/openvpn/server/ca.crt
+private_key = /etc/openvpn/server/ca.key
+default_md = sha256
+default_days = 3650
+default_crl_days = 30
+policy = policy_any
+[ policy_any ]
+commonName = supplied
+[ req ]
+distinguished_name = req_dn
+[ req_dn ]
+EOF
+    fi
+    # Sertifikat server.
+    if [[ ! -f "$OVPN_DIR/server.crt" ]]; then
+        info "Membuat sertifikat server OpenVPN..."
+        openssl req -newkey rsa:2048 -keyout "$OVPN_DIR/server.key" -out /tmp/ovpn-server.csr -nodes -subj "/CN=server" 2>/dev/null || { error "Gagal membuat CSR server."; return 1; }
+        openssl ca -batch -config "$OVPN_DIR/ca.cnf" -in /tmp/ovpn-server.csr -out "$OVPN_DIR/server.crt" 2>/dev/null || { error "Gagal menandatangani sertifikat server."; rm -f /tmp/ovpn-server.csr; return 1; }
+        chmod 600 "$OVPN_DIR/server.key"
+        rm -f /tmp/ovpn-server.csr
+    fi
+    # tls-crypt key.
+    if [[ ! -f "$OVPN_DIR/ta.key" ]]; then
+        openvpn --genkey secret "$OVPN_DIR/ta.key" 2>/dev/null || { error "Gagal membuat ta.key (openvpn --genkey)."; return 1; }
+        chmod 600 "$OVPN_DIR/ta.key"
+    fi
+    # CRL awal (kosong) supaya crl-verify di server config selalu ada.
+    # WAJIB berhasil — bila crl.pem tidak ada, OpenVPN menolak start
+    # (options error: --crl-verify fails).
+    if [[ ! -f "$OVPN_DIR/crl.pem" ]]; then
+        if ! openssl ca -batch -config "$OVPN_DIR/ca.cnf" -gencrl -out "$OVPN_DIR/crl.pem" 2>/dev/null; then
+            error "Gagal membuat CRL awal (openssl ca -gencrl) — server OpenVPN tidak akan start."
+            return 1
+        fi
+        chmod 644 "$OVPN_DIR/crl.pem" 2>/dev/null || true
+    fi
+    return 0
+}
+
+setup_openvpn() {
+    echo "=== Install OpenVPN WS-SSL ==="
+    # 1. Paket.
+    if ! command -v openvpn >/dev/null 2>&1; then
+        info "Menginstall openvpn..."
+        if ! timeout 300 apt-get install -y openvpn 2>/dev/null; then
+            error "Gagal install openvpn (cek internet/DNS VPS — coba Features 9 ganti DNS)."
+            return 1
+        fi
+    fi
+    ovpn_ensure_websockets || return 1
+    # 2. PKI.
+    ovpn_setup_pki || return 1
+    # 3. Config server ws-ssl (template openvpn-server@ws-ssl).
+    cat > "$OVPN_DIR/ws-ssl.conf" <<EOF
+port $OVPN_SERVER_PORT
+proto tcp
+dev tun
+ca $OVPN_DIR/ca.crt
+cert $OVPN_DIR/server.crt
+key $OVPN_DIR/server.key
+dh none
+tls-crypt $OVPN_DIR/ta.key
+crl-verify $OVPN_DIR/crl.pem
+server $OVPN_SUBNET 255.255.255.0
+topology subnet
+ifconfig-pool-persist $OVPN_DIR/ipp.txt
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 1.1.1.1"
+push "dhcp-option DNS 1.0.0.1"
+keepalive 10 120
+cipher AES-256-GCM
+auth SHA256
+user nobody
+group nogroup
+persist-key
+persist-tun
+status /var/log/openvpn-ws-ssl-status.log
+verb 3
+explicit-exit-notify 0
+EOF
+    # 4. IP forward + NAT untuk subnet OpenVPN.
+    sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
+    grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    if [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" != "1" ]]; then
+        warn "IP forward tidak bisa diaktifkan (butuh hak root penuh) — klien OpenVPN mungkin tidak bisa internet."
+    fi
+    local out_iface
+    out_iface=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+    [[ -n "$out_iface" ]] || out_iface="eth0"
+    if ! iptables -t nat -C POSTROUTING -s "${OVPN_SUBNET}/24" -o "$out_iface" -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -s "${OVPN_SUBNET}/24" -o "$out_iface" -j MASQUERADE 2>/dev/null || warn "Gagal menambah NAT MASQUERADE (klien OpenVPN mungkin tidak bisa internet)."
+    fi
+    if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent save 2>/dev/null || true; fi
+    # 5. Jalankan server OpenVPN (template systemd).
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable openvpn-server@ws-ssl 2>/dev/null || true
+    systemctl restart openvpn-server@ws-ssl 2>/dev/null || systemctl start openvpn-server@ws-ssl 2>/dev/null || true
+    sleep 2
+    if systemctl is-active --quiet openvpn-server@ws-ssl 2>/dev/null; then
+        info "Server OpenVPN jalan (TCP $OVPN_SERVER_PORT, tun $OVPN_SUBNET/24)."
+    else
+        error "Server OpenVPN gagal start — log:"
+        journalctl -u openvpn-server@ws-ssl -n 20 --no-pager 2>/dev/null || true
+        return 1
+    fi
+    # 6. Jembatan WebSocket ws-ovpn (pola sama seperti ws-epro).
+    mkdir -p "$OVPN_WS_DIR"
+    cat > "$OVPN_WS_DIR/ws-ovpn.py" <<'PYEOF'
+#!/usr/bin/env python3
+"""WS-OVPN: jembatan WebSocket -> TCP untuk OpenVPN.
+Mendengarkan 127.0.0.1:10091, meneruskan setiap koneksi WS ke OpenVPN 127.0.0.1:1194.
+Dipakai Nginx location /ovpn (port 80 non-TLS dan 443 TLS).
+"""
+import asyncio
+import logging
+
+import websockets
+
+LISTEN_HOST = "127.0.0.1"
+LISTEN_PORT = 10091
+OVPN_HOST = "127.0.0.1"
+OVPN_PORT = 1194
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+async def handle(ws, path=None):
+    try:
+        reader, writer = await asyncio.open_connection(OVPN_HOST, OVPN_PORT)
+    except Exception as e:
+        logging.error("gagal connect OpenVPN: %s", e)
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        return
+
+    async def ws_to_tcp():
+        try:
+            async for msg in ws:
+                if isinstance(msg, bytes):
+                    writer.write(msg)
+                    await writer.drain()
+        except Exception:
+            pass
+        finally:
+            writer.close()
+
+    async def tcp_to_ws():
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+                await ws.send(data)
+        except Exception:
+            pass
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    await asyncio.gather(ws_to_tcp(), tcp_to_ws())
+
+
+async def main():
+    async with websockets.serve(handle, LISTEN_HOST, LISTEN_PORT, max_size=10 * 1024 * 1024):
+        logging.info("ws-ovpn jalan di %s:%d -> OpenVPN %s:%d", LISTEN_HOST, LISTEN_PORT, OVPN_HOST, OVPN_PORT)
+        await asyncio.Future()
+
+
+asyncio.run(main())
+PYEOF
+    chmod +x "$OVPN_WS_DIR/ws-ovpn.py"
+    cat > /etc/systemd/system/ws-ovpn.service <<'EOF'
+[Unit]
+Description=WS-OVPN bridge (WebSocket to OpenVPN 1194)
+After=network.target openvpn-server@ws-ssl.service
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/ws-ovpn/ws-ovpn.py
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable ws-ovpn >/dev/null 2>&1 || true
+    systemctl restart ws-ovpn 2>/dev/null || systemctl start ws-ovpn 2>/dev/null || true
+    sleep 1
+    if systemctl is-active --quiet ws-ovpn 2>/dev/null; then
+        info "ws-ovpn berjalan (127.0.0.1:10091 -> OpenVPN 1194)."
+    else
+        warn "ws-ovpn gagal start — OpenVPN WS (/ovpn) tidak jalan; OpenVPN TCP 1194 langsung tetap jalan."
+    fi
+    # 7. Nginx location /ovpn (tulis ulang config + reload).
+    local _ovpn_domain
+    _ovpn_domain=$(state_get '.install.domain // ""')
+    write_nginx_conf "$_ovpn_domain" || warn "Gagal tulis ulang config Nginx — /ovpn mungkin belum aktif (coba menu 12 -> 11 Fixx Nginx)."
+    # 8. Verifikasi.
+    if chk_ovpn_wsssl; then
+        info "OpenVPN WS-SSL: ON (server + jembatan WS jalan)."
+    else
+        warn "OpenVPN WS-SSL masih OFF menurut Running Service — cek: systemctl status openvpn-server@ws-ssl ws-ovpn"
+    fi
+    return 0
+}
+
+create_ovpn() { # $1=name $2=days — buat sertifikat klien + file .ovpn
+    local name="${1:-}" days="${2:-}"
+    [[ -z "$name" ]] && name=$(ask_name "ovpn")
+    if ! valid_username "$name"; then error "Nama tidak valid: $name"; return 1; fi
+    if state_account_exists "ovpn" "$name"; then error "Akun OpenVPN ${name} sudah ada."; return 1; fi
+    [[ -z "$days" ]] && days=$(ask_days)
+    valid_days "$days" || { error "Hari tidak valid: $days"; return 1; }
+    if ! chk_ovpn_wsssl; then
+        info "Server OpenVPN belum jalan — install dulu..."
+        setup_openvpn || { error "Install OpenVPN gagal."; return 1; }
+    fi
+    local cdir="/etc/openvpn/clients"
+    mkdir -p "$cdir"
+    if [[ -f "$cdir/${name}.crt" ]]; then error "Sertifikat klien ${name} sudah ada."; return 1; fi
+    openssl req -newkey rsa:2048 -keyout "$cdir/${name}.key" -out "/tmp/ovpn-${name}.csr" -nodes -subj "/CN=${name}" 2>/dev/null || { error "Gagal membuat kunci klien."; return 1; }
+    openssl ca -batch -config "$OVPN_DIR/ca.cnf" -in "/tmp/ovpn-${name}.csr" -out "$cdir/${name}.crt" 2>/dev/null || { error "Gagal menandatangani sertifikat klien."; rm -f "/tmp/ovpn-${name}.csr"; return 1; }
+    chmod 600 "$cdir/${name}.key"
+    rm -f "/tmp/ovpn-${name}.csr"
+    local domain expiry
+    domain=$(state_get '.install.domain // ""')
+    if [[ -z "$domain" ]]; then
+        domain=$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+    fi
+    expiry=$(expiry_iso "$days")
+    local ovpn_file="/root/ovpn-${name}.ovpn"
+    {
+        echo "client"
+        echo "dev tun"
+        echo "proto tcp"
+        echo "# WS-SSL: WebSocket ke https://$domain/ovpn (port 443) — butuh klien"
+        echo "# OpenVPN yang mendukung WebSocket. Bila klien standar, remote"
+        echo "# kedua (1194 TCP langsung) yang akan dipakai."
+        echo "remote $domain 443"
+        echo "remote $domain $OVPN_SERVER_PORT"
+        echo "resolv-retry infinite"
+        echo "nobind"
+        echo "persist-key"
+        echo "persist-tun"
+        echo "remote-cert-tls server"
+        echo "cipher AES-256-GCM"
+        echo "auth SHA256"
+        echo "verb 3"
+        echo "key-direction 1"
+        echo "<ca>"
+        cat "$OVPN_DIR/ca.crt"
+        echo "</ca>"
+        echo "<cert>"
+        cat "$cdir/${name}.crt"
+        echo "</cert>"
+        echo "<key>"
+        cat "$cdir/${name}.key"
+        echo "</key>"
+        echo "<tls-crypt>"
+        cat "$OVPN_DIR/ta.key"
+        echo "</tls-crypt>"
+    } > "$ovpn_file"
+    chmod 600 "$ovpn_file"
+    local acc
+    acc=$(jq -n --arg name "$name" --arg exp "$expiry" --arg now "$(today_iso)" \
+        '{protocol:"ovpn", name:$name, uuid:"", password:"", expiry:$exp,
+          limit_ip:null, flow:"", transport:"", status:"active", created_at:$now}')
+    state_add_account "$acc" || { error "Gagal menyimpan state — sertifikat klien tetap ada di $cdir."; return 1; }
+    echo "=== OpenVPN - CEK AKUN ==="
+    echo "Remarks : $name"
+    echo "Domain  : $domain"
+    echo "Expired : $expiry"
+    echo "Config  : $ovpn_file"
+    echo "WS-SSL  : $domain:443 (path /ovpn, butuh klien WebSocket)"
+    echo "TCP     : $domain:$OVPN_SERVER_PORT (klien standar)"
+    return 0
+}
+
+delete_ovpn() { # $1=name — revoke sertifikat klien + hapus state
+    local name="${1:-}"
+    [[ -z "$name" ]] && { error "Nama akun OpenVPN wajib diisi."; return 1; }
+    local cdir="/etc/openvpn/clients"
+    if [[ -f "$cdir/${name}.crt" ]]; then
+        openssl ca -batch -config "$OVPN_DIR/ca.cnf" -revoke "$cdir/${name}.crt" 2>/dev/null || true
+        openssl ca -batch -config "$OVPN_DIR/ca.cnf" -gencrl -out "$OVPN_DIR/crl.pem" 2>/dev/null || true
+        chmod 644 "$OVPN_DIR/crl.pem" 2>/dev/null || true
+        rm -f "$cdir/${name}.crt" "$cdir/${name}.key" "/root/ovpn-${name}.ovpn"
+        systemctl restart openvpn-server@ws-ssl 2>/dev/null || true
+    fi
+    state_del_account "ovpn" "$name" 2>/dev/null || true
+    info "Akun OpenVPN ${name} dihapus (sertifikat di-revoke)."
+    return 0
+}
+
+feat_install_openvpn() {
+    echo "=== Install OpenVPN WS-SSL ==="
+    setup_openvpn || return 1
+    sleep 1
+    if chk_ovpn_wsssl; then
+        info "OpenVPN WS-SSL jalan."
+    else
+        error "OpenVPN WS-SSL gagal jalan — log server:"
+        journalctl -u openvpn-server@ws-ssl -n 20 --no-pager 2>/dev/null || true
+        journalctl -u ws-ovpn -n 20 --no-pager 2>/dev/null || true
+        return 1
+    fi
+    if ! state_account_exists "ovpn" "ovpn"; then
+        info "Membuat akun klien contoh (ovpn, 30 hari)..."
+        create_ovpn "ovpn" 30 || warn "Gagal membuat akun contoh ovpn (server tetap jalan; buat manual via: vps-manager --create ovpn --name <nama> --days 30)."
+    fi
+    return 0
+}
+
 do_install() {
     # Argumen opsional (mode non-interaktif): $1=mode $2=domain $3=email
     local mode="${1:-}" domain="${2:-}" email="${3:-}"
@@ -1915,6 +2296,7 @@ create_account() { # $1=proto — panggil create_* interaktif (menu Buat Akun)
         vless) create_vless ;;
         trojan) create_trojan ;;
         ss) create_ss ;;
+        ovpn) create_ovpn ;;
         *) error "Protokol tidak valid: $1"; return 1 ;;
     esac
 }
@@ -2112,12 +2494,17 @@ delete_account() {
         proto=$(printf '%s' "$chosen" | cut -f1)
         name=$(printf '%s' "$chosen" | cut -f2)
     fi
-    case "$proto" in ssh|vmess|vless|trojan|ss) ;; *) error "Protokol tidak valid: $proto"; return 1 ;; esac
+    case "$proto" in ssh|vmess|vless|trojan|ss|ovpn) ;; *) error "Protokol tidak valid: $proto"; return 1 ;; esac
     if ! state_account_exists "$proto" "$name"; then
         error "Akun ${proto}/${name} tidak ditemukan."
         return 1
     fi
     confirm_destructive "HAPUS akun ${proto}/${name} secara permanen?" || { info "Dibatalkan."; return 0; }
+    if [[ "$proto" == "ovpn" ]]; then
+        # Revoke sertifikat + CRL + hapus state (delete_ovpn).
+        delete_ovpn "$name"
+        return 0
+    fi
     if [[ "$proto" == "ssh" ]]; then
         if id "$name" >/dev/null 2>&1; then
             userdel -r "$name" 2>/dev/null || userdel "$name" 2>/dev/null || warn "userdel gagal — user ${name} mungkin masih login."
@@ -2134,7 +2521,7 @@ delete_account() {
 renew_account() {
     # $1=protocol $2=name $3=days
     local proto="${1:-}" name="${2:-}" days="${3:-}"
-    if [[ -z "$proto" ]]; then read -r -p "Protokol (ssh/vmess/vless/trojan/ss): " proto; fi
+    if [[ -z "$proto" ]]; then read -r -p "Protokol (ssh/vmess/vless/trojan/ss/ovpn): " proto; fi
     if [[ -z "$name" ]]; then read -r -p "Nama akun: " name; fi
     if [[ -z "$days" ]]; then days=$(ask_days); fi
     valid_days "$days" || { error "Hari tidak valid: $days"; return 1; }
@@ -2232,7 +2619,7 @@ show_link() {
     # $1=protocol $2=name
     local proto="${1:-}" name="${2:-}"
     if [[ -z "$proto" ]]; then
-        if [[ -t 0 ]]; then read -r -p "Protokol (vmess/vless/trojan/ss/ssh): " proto;
+        if [[ -t 0 ]]; then read -r -p "Protokol (vmess/vless/trojan/ss/ssh/ovpn): " proto;
         else error "Protokol wajib diisi (--protocol)."; return 1; fi
     fi
     if [[ -z "$name" ]]; then
@@ -2328,6 +2715,26 @@ show_link() {
                 # Mode reality: Trojan lewat WS 10003 tanpa TLS (port dibuka UFW bila perlu).
                 link="trojan://${pw}@${addr}:10003?security=none&type=ws&path=${trojan_path}#${name}"
             fi
+            ;;
+        ovpn)
+            local exp geo city isp exp_disp
+            exp=$(jq -r --arg n "$name" '.accounts[] | select(.protocol=="ovpn" and .name==$n) | .expiry' "$STATE_FILE")
+            exp_disp=$(trial_expiry_display "ovpn" "$name" "$exp")
+            geo=$(server_geo); city="${geo%%|*}"; isp="${geo##*|}"
+            echo "OpenVPN - CEK AKUN"
+            echo "----------------------------------------"
+            echo "Remarks    : ${name}"
+            echo "Domain     : ${addr}"
+            echo "ISP        : ${isp}"
+            echo "City       : ${city}"
+            echo "Expired On : ${exp_disp}"
+            echo "----------------------------------------"
+            echo "CONFIG OPENVPN"
+            echo "File .ovpn : /root/ovpn-${name}.ovpn"
+            echo "WS-SSL     : ${addr}:443 (path /ovpn, butuh klien WebSocket)"
+            echo "TCP        : ${addr}:1194 (klien standar)"
+            echo "----------------------------------------"
+            return 0
             ;;
         ss)
             local pw method ss_b64
@@ -4301,9 +4708,9 @@ feat_booster_cpu() {
 # Perbaiki SEMUA layanan yang OFF di Running Service (dipanggil dari
 # Running Service bila user jawab y, atau langsung dari Features 27).
 # Setiap kelompok hanya diperbaiki bila ada entrinya yang OFF; yang sudah ON
-# dilewati. OpenVPN + OHP TIDAK dipasang di sini — keduanya butuh server
-# sendiri (OpenVPN butuh PKI + NAT, OHP butuh server OpenVPN) dan bukan
-# sekadar "restart"; dilaporkan jujur sebagai belum terpasang.
+# dilewati. OHP OpenVPN TIDAK dipasang di sini — butuh server OpenVPN yang
+# sudah jalan (kini dipasang oleh setup_openvpn bila OFF, lihat di bawah);
+# OHP-nya sendiri tetap opsional dan dilaporkan jujur bila belum ada.
 feat_fix_all_services() {
     echo "=== Fixx Semua Service OFF ==="
     echo "Memeriksa 29 layanan, memperbaiki yang OFF (yang sudah ON dilewati)."
@@ -4349,15 +4756,16 @@ feat_fix_all_services() {
         apply_xray || warn "[Xray] apply gagal — lihat diagnosa di atas."
         sleep 1
     fi
-    if ! chk_ovpn_ssl || ! chk_ovpn_wsssl || ! chk_ovpn_udp || ! chk_ovpn_tcp; then
-        warn "[OpenVPN] belum terpasang — vps-manager belum menginstall server OpenVPN (SSL/WS-SSL/UDP/TCP). Bila mau dipasang, minta 'tambah OpenVPN'."
+    if ! chk_ovpn_wsssl; then
+        info "[OpenVPN WS-SSL] OFF — install server OpenVPN + jembatan WS..."
+        setup_openvpn || warn "[OpenVPN WS-SSL] install gagal (lihat pesan di atas)."
     fi
     if ! chk_ohp_ssh || ! chk_ohp_dropbear; then
         info "[OHP SSH / Dropbear] ada yang OFF — setup OHP (SSH 8181 + Dropbear 8282)..."
         setup_ohp || warn "[OHP] setup gagal (lihat pesan di atas)."
     fi
     if ! chk_ohp_ovpn; then
-        warn "[OHP OpenVPN] tetap OFF — butuh server OpenVPN (belum dipasang). Minta 'tambah OpenVPN' bila mau."
+        warn "[OHP OpenVPN] tetap OFF — OHP untuk OpenVPN belum dipasang (server OpenVPN sendiri sudah bisa dipasang via menu 12 -> 28)."
     fi
     echo
     echo "=== Hasil sesudah perbaikan ==="
@@ -4401,6 +4809,7 @@ show_features_menu() {
     echo " 25.) Boster CPU (multi-threading)"
     echo " 26.) Back to Menu"
     echo " 27.) Fixx Semua Service OFF"
+    echo " 28.) Install OpenVPN WS-SSL"
     echo "  x . EXIT"
     printf '%b\n' "${C_BLUE}------------------------------------------------------------${C_RESET}"
 }
@@ -4410,7 +4819,7 @@ submenu_features() {
         clear 2>/dev/null || true
         show_features_menu
         local pilih=""
-        read -r -p "Pilih dari opsi [1-27 atau x]: " pilih || return 0
+        read -r -p "Pilih dari opsi [1-28 atau x]: " pilih || return 0
         # Setiap aksi dibungkus "|| warn" supaya kegagalan kembali ke menu
         # Features, bukan keluar script (pola yang sama seperti menu_loop).
         case "$pilih" in
@@ -4441,6 +4850,7 @@ submenu_features() {
             25) feat_booster_cpu || warn "Boster CPU gagal." ;;
             26) return 0 ;;
             27) feat_fix_all_services || warn "Fixx Semua Service gagal." ;;
+            28) feat_install_openvpn || warn "Install OpenVPN gagal." ;;
             x|X) exit 0 ;;
             *)  error "Pilihan tidak valid: ${pilih}" ;;
         esac
@@ -4755,6 +5165,7 @@ PENGGUNAAN:
   bash vps-manager.sh --create vless  --name user1 --days 30 [--transport ws|tcp]
   bash vps-manager.sh --create trojan --name user1 --days 30 [--password rahasia]
   bash vps-manager.sh --create ss     --name user1 --days 30 [--password rahasia]
+  bash vps-manager.sh --create ovpn   --name user1 --days 30
 
   bash vps-manager.sh --list
   bash vps-manager.sh --delete --protocol vmess --name user1 [--yes]
@@ -4845,7 +5256,8 @@ main() {
                 vless)  create_vless "$name" "$days" "$transport" "$limit_ip" ;;
                 trojan) create_trojan "$name" "$days" "$password" ;;
                 ss)     create_ss "$name" "$days" "$password" ;;
-                *) error "--create butuh protokol: ssh|vmess|vless|trojan|ss"; exit 1 ;;
+                ovpn)   create_ovpn "$name" "$days" ;;
+                *) error "--create butuh protokol: ssh|vmess|vless|trojan|ss|ovpn"; exit 1 ;;
             esac
             ;;
         delete) delete_account "$proto" "$name" ;;
