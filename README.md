@@ -126,7 +126,12 @@ referensi — 26 item dalam 5 bagian:
 
 ```
 FEATURES
-  1.) Running Service          (status Xray/Nginx/ws-epro/Bot + port LISTEN)
+  1.) Running Service          (29 layanan seperti layar ARISCTUNNEL: SSH/TUN,
+                                SSH UDP-HC, OpenVPN, OHP, WS ePRO, BadVPN,
+                                Dropbear, Haproxy, Crons, Nginx, Xray
+                                Vmess/Vless/Trojan/Shadowsocks WS TLS/Non
+                                TLS/gRPC; dicek via systemctl + ss + config
+                                Xray, tanpa error ps)
   2.) Restart Service          (restart Xray, Nginx, ws-epro, SSH berurutan)
   3.) Auto Reboot              (atur / hapus reboot harian)
   4.) Monitoring               (uptime, load, RAM, disk, traffic, top proses)

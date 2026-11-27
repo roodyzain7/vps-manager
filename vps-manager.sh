@@ -2401,21 +2401,93 @@ traffic_lines() { # cetak MONTH/RX/TX/DAY/RX/TX/TRAFFIC (vnstat bila ada, else t
 # -----------------------------------------------------------------------------
 feat_pause() { read -r -p "Tekan Enter untuk kembali ke menu Features..." -r _; }
 
+# --- helper pengecekan untuk Running Service (systemctl + ss + pgrep) ---
+port_tcp() { ss -tln 2>/dev/null | grep -q ":$1 "; }
+port_udp() { ss -uln 2>/dev/null | grep -q ":$1 "; }
+svc_active() { local u; for u in "$@"; do systemctl is-active --quiet "$u" 2>/dev/null && return 0; done; return 1; }
+proc_on() { pgrep -qf "$1" 2>/dev/null; }
+# xray_inbound <protokol> <network>: true bila config Xray punya inbound itu
+xray_inbound() {
+    [[ -f "$XRAY_CONFIG" ]] || return 1
+    python3 -c 'import json,sys
+try:
+    c=json.load(open(sys.argv[3]))
+except Exception:
+    sys.exit(1)
+ok=any(i.get("protocol")==sys.argv[1] and i.get("streamSettings",{}).get("network")==sys.argv[2] for i in c.get("inbounds",[]))
+sys.exit(0 if ok else 1)' "$1" "$2" "$XRAY_CONFIG" 2>/dev/null
+}
+chk_ssh_tun() { svc_active ssh sshd && port_tcp 22; }
+chk_ssh_udp() { proc_on udp-custom || port_udp 7100 || port_udp 7200 || port_udp 7300; }
+chk_ovpn_ssl() { svc_active openvpn-server@ssl openvpn@ssl || proc_on 'openvpn.*ssl'; }
+chk_ovpn_wsssl() { svc_active openvpn-server@ws-ssl openvpn@ws-ssl || proc_on 'openvpn.*ws'; }
+chk_ovpn_udp() { port_udp 1194; }
+chk_ovpn_tcp() { port_tcp 1194; }
+chk_ohp_ssh() { proc_on 'ohp.*ssh'; }
+chk_ohp_dropbear() { proc_on 'ohp.*dropbear'; }
+chk_ohp_ovpn() { proc_on 'ohp.*openvpn'; }
+chk_wsepro() { svc_active ws-epro && port_tcp 10090; }
+chk_badvpn7100() { port_udp 7100; }
+chk_badvpn7200() { port_udp 7200; }
+chk_badvpn7300() { port_udp 7300; }
+chk_dropbear() { svc_active dropbear && { port_tcp 109 || port_tcp 143; }; }
+chk_haproxy() { svc_active haproxy && port_tcp 8880; }
+chk_crons() { svc_active cron crond; }
+chk_nginx() { svc_active nginx && port_tcp 443; }
+chk_xray_vmess_tls() { svc_active xray && xray_inbound vmess ws && port_tcp 443; }
+chk_xray_vmess_nontls() { svc_active xray && xray_inbound vmess ws && port_tcp 80; }
+chk_xray_vmess_grpc() { svc_active xray && xray_inbound vmess grpc; }
+chk_xray_vless_tls() { svc_active xray && xray_inbound vless ws && port_tcp 443; }
+chk_xray_vless_nontls() { svc_active xray && xray_inbound vless ws && port_tcp 80; }
+chk_xray_vless_grpc() { svc_active xray && xray_inbound vless grpc; }
+chk_xray_trojan_ws() { svc_active xray && xray_inbound trojan ws && port_tcp 443; }
+chk_xray_trojan_nonws() { svc_active xray && xray_inbound trojan ws && port_tcp 80; }
+chk_xray_trojan_grpc() { svc_active xray && xray_inbound trojan grpc; }
+chk_xray_ss_ws() { svc_active xray && xray_inbound shadowsocks ws && port_tcp 443; }
+chk_xray_ss_nonws() { svc_active xray && xray_inbound shadowsocks ws && port_tcp 80; }
+chk_xray_ss_grpc() { svc_active xray && xray_inbound shadowsocks grpc; }
+# svc_line <label> <fungsi-cek>: satu baris "| Service <nama> = [ON]/[OFF]"
+svc_line() {
+    local label="$1"; shift
+    if "$@" >/dev/null 2>&1; then
+        printf ' | Service %-25s = %b[ON]%b\n' "$label" "$C_GREEN" "$C_RESET"
+    else
+        printf ' | Service %-25s = %b[OFF]%b\n' "$label" "$C_RED" "$C_RESET"
+    fi
+}
 feat_running_service() {
     echo "=== Running Service ==="
-    local svc
-    for svc in ssh xray nginx ws-epro vps-bot haproxy; do
-        if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            printf '  %-10s : %bON%b\n' "$svc" "$C_GREEN" "$C_RESET"
-        else
-            printf '  %-10s : %bOFF%b\n' "$svc" "$C_RED" "$C_RESET"
-        fi
-    done
+    svc_line "SSH / TUN" chk_ssh_tun
+    svc_line "SSH UDP-HC" chk_ssh_udp
+    svc_line "OpenVPN SSL" chk_ovpn_ssl
+    svc_line "OpenVPN WS-SSL" chk_ovpn_wsssl
+    svc_line "OpenVPN UDP" chk_ovpn_udp
+    svc_line "OpenVPN TCP" chk_ovpn_tcp
+    svc_line "OHP SSH" chk_ohp_ssh
+    svc_line "OHP Dropbear" chk_ohp_dropbear
+    svc_line "OHP OpenVPN" chk_ohp_ovpn
+    svc_line "WS ePRO" chk_wsepro
+    svc_line "BadVPN 7100" chk_badvpn7100
+    svc_line "BadVPN 7200" chk_badvpn7200
+    svc_line "BadVPN 7300" chk_badvpn7300
+    svc_line "Dropbear" chk_dropbear
+    svc_line "Haproxy" chk_haproxy
+    svc_line "Crons" chk_crons
+    svc_line "Nginx Webserver" chk_nginx
+    svc_line "Xray Vmess WS TLS" chk_xray_vmess_tls
+    svc_line "Xray Vmess WS Non TLS" chk_xray_vmess_nontls
+    svc_line "Xray Vmess gRPC" chk_xray_vmess_grpc
+    svc_line "Xray Vless WS TLS" chk_xray_vless_tls
+    svc_line "Xray Vless WS Non TLS" chk_xray_vless_nontls
+    svc_line "Xray Vless gRPC" chk_xray_vless_grpc
+    svc_line "Xray Trojan WS" chk_xray_trojan_ws
+    svc_line "Xray Trojan Non WS" chk_xray_trojan_nonws
+    svc_line "Xray Trojan gRPC" chk_xray_trojan_grpc
+    svc_line "Xray Shadowsocks WS" chk_xray_ss_ws
+    svc_line "Xray Shadowsocks Non WS" chk_xray_ss_nonws
+    svc_line "Xray Shadowsocks gRPC" chk_xray_ss_grpc
     echo
-    echo "--- Port yang LISTEN ---"
-    ss -tlnp 2>/dev/null | awk 'NR>1 {print "  "$1" "$4" "$NF}' | sort -u
-    echo
-    if systemctl is-active --quiet xray 2>/dev/null && systemctl is-active --quiet nginx 2>/dev/null; then
+    if svc_active xray && svc_active nginx; then
         info "SIAP DIGUNAKAN — Xray + Nginx jalan."
     else
         warn "Ada layanan mati — pakai 2.) Restart Service atau 13.)/14.) Fixx."
