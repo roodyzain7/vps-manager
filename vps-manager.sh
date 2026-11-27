@@ -2903,7 +2903,13 @@ write_haproxy_conf() {
     cat > /etc/haproxy/haproxy.cfg <<'HAPROXYEOF'
 global
     log /dev/log local0
-    maxconn 4096
+    maxconn 1024
+    # maxconn 1024 (bukan 4096): HAProxy butuh ~2*maxconn + jumlah listener
+    # (~790, karena rentang 222-442 + 444-1000) FD. Dengan 4096 butuh ~9005 FD
+    # dan service gagal start bila batas FD sistem hanya 4096 ("Cannot raise
+    # FD limit", tanpa error bind — persis laporan 27 Nov 2026). Dengan 1024
+    # butuh ~2900 FD, muat bahkan di batas 4096; untuk VPN pribadi (beberapa
+    # akun) 1024 koneksi bersamaan sudah sangat longgar.
 
 defaults
     log global
@@ -2959,6 +2965,18 @@ backend xray-tls
 HAPROXYEOF
 }
 
+haproxy_apply_limits() {
+    # Naikkan batas file descriptor service HAProxy via drop-in systemd, agar
+    # maxconn + ~790 listener tidak mentok di batas default. Aman bila systemd
+    # tidak ada (daemon-reload gagal -> diabaikan).
+    mkdir -p /etc/systemd/system/haproxy.service.d 2>/dev/null || return 0
+    cat > /etc/systemd/system/haproxy.service.d/limits.conf <<'LIMITSEOF'
+[Service]
+LimitNOFILE=65535
+LIMITSEOF
+    systemctl daemon-reload 2>/dev/null || true
+}
+
 haproxy_fix_bind() {
     # HAProxy gagal start karena ada port yang bentrok: baca port itu dari
     # journal, tampilkan pemegangnya, bebaskan (tanya dulu bila interaktif),
@@ -2973,9 +2991,22 @@ haproxy_fix_bind() {
         fi
         jlog=$(journalctl -u haproxy -n 30 --no-pager 2>/dev/null)
         printf '%s\n' "$jlog" | grep -i "cannot bind" | head -n 3 >&2 || true
+        # FD limit: HAProxy butuh ~2*maxconn + ~790 listener FD. Bila journal
+        # menunjukkan "Cannot raise FD limit", tulis ulang config (maxconn
+        # sudah diturunkan ke 1024) + naikkan LimitNOFILE service, lalu coba lagi.
+        if printf '%s\n' "$jlog" | grep -qi "fd limit"; then
+            warn "HAProxy gagal start karena batas file descriptor (FD limit) terlalu kecil — memperbaiki (maxconn 1024 + LimitNOFILE 65535)..."
+            write_haproxy_conf
+            haproxy_apply_limits
+            systemctl restart haproxy 2>/dev/null || true
+            sleep 2
+            continue
+        fi
         port=$(printf '%s\n' "$jlog" | grep -i "cannot bind" | head -n 1 | sed -nE 's/.*:([0-9]+)\].*/\1/p')
         if [[ -z "$port" ]]; then
-            error "HAProxy gagal jalan tapi journal tidak menunjukkan port bentrok. Cek manual: journalctl -u haproxy -n 30"
+            error "HAProxy gagal jalan. Isi journal terakhir (penyebab aslinya ada di sini):"
+            printf '%s\n' "$jlog" | tail -n 12 >&2 || true
+            error "Bila masih belum jelas, cek manual: journalctl -u haproxy -n 30"
             return 1
         fi
         if [[ "$port" == "443" || "$port" == "80" ]]; then
@@ -3013,6 +3044,7 @@ setup_haproxy() {
         fi
     fi
     write_haproxy_conf
+    haproxy_apply_limits
     if ! haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5; then
         error "Config HAProxy TIDAK valid."
         return 1
@@ -3051,6 +3083,7 @@ feat_fix_haproxy() {
         write_haproxy_conf
         haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | tail -n 5 || { error "Config baru tetap tidak valid."; return 1; }
     fi
+    haproxy_apply_limits
     systemctl restart haproxy
     sleep 2
     if systemctl is-active --quiet haproxy && port_tcp 8880; then
