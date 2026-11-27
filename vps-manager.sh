@@ -1793,8 +1793,9 @@ create_ssh() {
     echo "Perintah   : ssh ${name}@${addr}"
     echo "----------------------------------------"
     echo "SSH TUNNEL WEBSOCKET (HTTP CUSTOM)"
-    echo "WS NTLS    : ${addr}:80 (path /ssh-ws)"
-    echo "WS TLS/SNI : ${addr}:443 (path /ssh-ws, SNI ${addr})"
+    echo "WS NTLS    : ${addr}:80@${name}:${password}"
+    echo "WS TLS/SNI : ${addr}:443@${name}:${password}"
+    echo "Path WS    : /ssh-ws"
     echo "----------------------------------------"
 }
 
@@ -2291,8 +2292,9 @@ show_link() {
             echo "Perintah   : ssh ${name}@${addr}"
             echo "----------------------------------------"
             echo "SSH TUNNEL WEBSOCKET (HTTP CUSTOM)"
-            echo "WS NTLS    : ${addr}:80 (path /ssh-ws)"
-            echo "WS TLS/SNI : ${addr}:443 (path /ssh-ws, SNI ${addr})"
+            echo "WS NTLS    : ${addr}:80@${name}"
+            echo "WS TLS/SNI : ${addr}:443@${name}"
+            echo "Path WS    : /ssh-ws"
             echo "----------------------------------------"
             return 0
             ;;
