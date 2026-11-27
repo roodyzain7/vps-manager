@@ -105,7 +105,7 @@ jalankan `vps-manager` sekali.)
 ============================================================
   01) Install / Update         07) Hapus Akun
   02) Buat Akun SSH            08) Perpanjang Akun
-  03) Buat Akun VMess          09) Link / QR Code
+  03) Buat Akun VMess          09) Link Akun
   04) Buat Akun VLESS          10) Uninstall Bersih
   05) Buat Akun Trojan         11) Bot Telegram
   06) List Semua Akun          00) Keluar
@@ -238,12 +238,12 @@ VPS tidak bisa mencapai api.telegram.org (DNS), chat dari akun/Chat ID
 yang berbeda dari yang dikonfigurasi, atau belum `/start` ke bot yang
 benar. Diagnosa menampilkan semuanya — termasuk username bot yang benar.
 
-**Buat akun via bot tidak menampilkan hasil?** Itu bug di `show_link`:
-prompt "Simpan QR sebagai PNG?" tidak terjaga terminal, jadi saat bot
-menjalankan pembuatan akun, `read` gagal (stdin kosong) dan script mati
-tepat sebelum hasil dikirim. Sudah diperbaiki — prompt itu sekarang hanya
-muncul di terminal interaktif, dan bot menjalankan CLI dengan stdin
-`/dev/null` supaya tidak pernah menggantung.
+**Buat akun via bot tidak menampilkan hasil?** Dulu penyebabnya prompt
+"Simpan QR sebagai PNG?" di `show_link` yang tidak terjaga terminal —
+saat bot menjalankan pembuatan akun, `read` gagal dan script mati sebelum
+hasil dikirim. QR sekarang dihapus total (tidak ditampilkan, tidak
+disimpan), jadi hasil pembuatan akun selalu sampai utuh ke bot. Bot juga
+menjalankan CLI dengan stdin `/dev/null` supaya tidak pernah menggantung.
 
 atau langsung:
 
@@ -277,7 +277,7 @@ Catatan:
 
 ## Contoh output link
 
-**VMess** (menu 9) — link `vmess://` (JSON base64) + QR di terminal:
+**VMess** (menu 9) — link `vmess://` (JSON base64):
 
 ```
 ================= LINK VMESS: user1 =================
@@ -309,9 +309,8 @@ vless://12345678-9abc-4def-9012-3456789abcde@1.2.3.4:443?encryption=none&flow=xt
 trojan://PasswordKuat20Karakter@vpn.domainkamu.com:443?security=tls&type=ws&host=vpn.domainkamu.com&path=/trojan#user1
 ```
 
-QR code tampil langsung di terminal (ANSI, via `qrencode`), dan bisa disimpan
-sebagai PNG ke `/root/<nama>-qr.png` bila diminta. Import link ke **v2rayNG**,
-NekoBox, Streisand, atau FoXray.
+Import link ke **v2rayNG**, NekoBox, Streisand, atau FoXray (salin
+link-nya saja — QR code tidak ditampilkan).
 
 > Contoh di atas memakai nilai ilustrasi (UUID/password/domain diganti) —
 > link asli dibuat dari akunmu sendiri.

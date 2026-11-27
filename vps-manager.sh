@@ -164,7 +164,7 @@ ensure_jq() {
 
 check_deps() {
     # Daftar dependensi wajib. Yang kurang di-install via apt (non-interaktif).
-    local deps=(curl jq qrencode uuid-runtime openssl nginx socat ufw python3 procps iproute2)
+    local deps=(curl jq uuid-runtime openssl nginx socat ufw python3 procps iproute2)
     local missing=()
     local dep
     for dep in "${deps[@]}"; do
@@ -1483,7 +1483,7 @@ check_expired() {
 }
 
 # -----------------------------------------------------------------------------
-# Tampilkan link/config + QR code
+# Tampilkan link/config
 # -----------------------------------------------------------------------------
 show_link() {
     # $1=protocol $2=name
@@ -1589,24 +1589,6 @@ show_link() {
         echo "$link_nontls"
     fi
     echo
-    # QR code di terminal (butuh qrencode) + opsi simpan PNG.
-    # PENTING: tanya simpan PNG HANYA bila stdin adalah terminal. Saat
-    # dipanggil bot Telegram (stdin=/dev/null), `read` tanpa penjaga ini
-    # gagal EOF dan `set -e` + ERR trap mematikan script — hasil pembuatan
-    # akun tidak pernah sampai ke bot.
-    if command -v qrencode >/dev/null 2>&1; then
-        qrencode -t ANSIUTF8 "$link"
-        if [[ -t 0 ]]; then
-            local save=""
-            read -r -p "Simpan QR sebagai PNG di /root/${name}-qr.png? [y/N]: " save
-            if [[ "${save:-}" =~ ^[Yy]$ ]]; then
-                qrencode -o "/root/${name}-qr.png" "$link"
-                info "QR disimpan: /root/${name}-qr.png"
-            fi
-        fi
-    else
-        warn "qrencode tidak tersedia — install dengan: apt install qrencode"
-    fi
     echo "Import link di atas ke v2rayNG / NekoBox / Streisand / FoXray."
 }
 
@@ -3105,7 +3087,7 @@ show_header() {
 show_menu() {
     printf '  %b01%b) %-24s %b07%b) %s\n' "$C_CYAN" "$C_RESET" "Install / Update" "$C_CYAN" "$C_RESET" "Hapus Akun"
     printf '  %b02%b) %-24s %b08%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun SSH" "$C_CYAN" "$C_RESET" "Perpanjang Akun"
-    printf '  %b03%b) %-24s %b09%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VMess" "$C_CYAN" "$C_RESET" "Link / QR Code"
+    printf '  %b03%b) %-24s %b09%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VMess" "$C_CYAN" "$C_RESET" "Link Akun"
     printf '  %b04%b) %-24s %b10%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun VLESS" "$C_CYAN" "$C_RESET" "Uninstall Bersih"
     printf '  %b05%b) %-24s %b11%b) %s\n' "$C_CYAN" "$C_RESET" "Buat Akun Trojan" "$C_CYAN" "$C_RESET" "Bot Telegram"
     printf '  %b06%b) %-24s %b12%b) %s\n' "$C_CYAN" "$C_RESET" "List Semua Akun" "$C_CYAN" "$C_RESET" "Features"
