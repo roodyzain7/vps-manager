@@ -1630,7 +1630,7 @@ do_install() {
     info "Perintah: menu  (buka menu ini lagi kapan saja)  |  vps-manager --help  (non-interaktif)"
     if [[ "$mode" == "domain" ]]; then
         info "Link permanen script (tidak expired): https://${domain}/vps-manager.sh"
-        info "Install di VPS lain: curl -fsSL https://${domain}/vps-manager.sh -o /usr/local/bin/vps-manager && chmod +x /usr/local/bin/vps-manager && vps-manager"
+        info "Install di VPS lain: curl -fsSL https://${domain}/vps-manager.sh -o /tmp/vps-manager.sh && bash -n /tmp/vps-manager.sh && cp /tmp/vps-manager.sh /usr/local/bin/vps-manager && chmod +x /usr/local/bin/vps-manager && vps-manager"
     fi
     echo
     do_check

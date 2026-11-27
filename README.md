@@ -62,7 +62,7 @@ https://<domain-kamu>/vps-manager.sh
 Install di VPS lain / install ulang, cukup:
 
 ```bash
-curl -fsSL https://<domain-kamu>/vps-manager.sh -o /usr/local/bin/vps-manager && chmod +x /usr/local/bin/vps-manager && vps-manager
+curl -fsSL https://<domain-kamu>/vps-manager.sh -o /tmp/vps-manager.sh && bash -n /tmp/vps-manager.sh && cp /tmp/vps-manager.sh /usr/local/bin/vps-manager && chmod +x /usr/local/bin/vps-manager && vps-manager
 ```
 
 Link ini hidup selama VPS-mu hidup. Cek dengan
