@@ -1070,43 +1070,174 @@ setup_dropbear() {
 # ulang config + unit lalu restart. Bila belum ada, coba unduh dari rilis
 # http-custom/udp-custom (pengganti aztecrabbit yang sudah tidak ada);
 # bila unduhan gagal, laporkan jujur — jangan pura-pura berhasil.
-setup_udp_custom() {
-    if [[ ! -x /usr/local/bin/udp-custom ]]; then
-        warn "Binary udp-custom belum ada — mencoba unduh dari rilis http-custom/udp-custom..."
-        local dl_ok=0
-        if curl -fsSL --max-time 60 -o /tmp/udp-custom \
-            "https://github.com/http-custom/udp-custom/releases/latest/download/udp-custom-linux-amd64" 2>/dev/null; then
-            if [[ -s /tmp/udp-custom ]]; then chmod +x /tmp/udp-custom; mv /tmp/udp-custom /usr/local/bin/udp-custom; dl_ok=1; fi
-        fi
-        if (( dl_ok == 0 )); then
-            rm -f /tmp/udp-custom
-            error "udp-custom tidak bisa diunduh — SSH UDP-HC + BadVPN tetap OFF. Pasang binary manual ke /usr/local/bin/udp-custom lalu jalankan lagi menu 12 > 27."
-            return 1
-        fi
+setup_udp_forward() {
+    # Forwarder UDP -> SSH (pengganti udp-custom / BadVPN udpgw), dibuat sendiri.
+    # Binary udp-custom TIDAK bisa diunduh (repo http-custom/udp-custom tidak
+    # punya rilis — 404), jadi fungsinya ditulis ulang di sini (Python stdlib):
+    # listen UDP 7100/7200/7300, teruskan ke SSH 127.0.0.1:22.
+    mkdir -p /opt/vps-tunnel
+    cat > /opt/vps-tunnel/udp-custom.py <<'PYEOF'
+#!/usr/bin/env python3
+"""UDP -> SSH forwarder (pengganti udp-custom / BadVPN udpgw).
+
+Listen UDP 7100/7200/7300, teruskan ke SSH 127.0.0.1:22 (TCP).
+Satu proses melayani ketiga port; tiap klien UDP (IP:port + port listen)
+dipetakan ke satu koneksi TCP SSH. Dibuat sendiri (stdlib saja) karena
+binary udp-custom tidak lagi bisa diunduh (repo http-custom/udp-custom
+tidak punya rilis — 404).
+"""
+import socket
+import threading
+import time
+import logging
+
+SSH_HOST = "127.0.0.1"
+SSH_PORT = 22
+UDP_PORTS = (7100, 7200, 7300)
+IDLE_TIMEOUT = 180
+BUF = 65535
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
+
+
+class Client:
+    def __init__(self, addr, sock):
+        self.addr = addr
+        self.sock = sock
+        self.tcp = socket.create_connection((SSH_HOST, SSH_PORT), timeout=10)
+        self.tcp.settimeout(60)
+        self.last = time.time()
+        self.lock = threading.Lock()
+        self.closed = False
+
+    def send_to_tcp(self, data):
+        with self.lock:
+            if self.closed:
+                return
+            try:
+                self.tcp.sendall(data)
+                self.last = time.time()
+            except OSError:
+                self.close()
+
+    def close(self):
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            try:
+                self.tcp.close()
+            except OSError:
+                pass
+
+
+clients = {}
+clients_lock = threading.Lock()
+
+
+def tcp_reader(client, key):
+    try:
+        while True:
+            data = client.tcp.recv(16384)
+            if not data:
+                break
+            client.last = time.time()
+            try:
+                client.sock.sendto(data, client.addr)
+            except OSError:
+                break
+    except OSError:
+        pass
+    finally:
+        with clients_lock:
+            if clients.get(key) is client:
+                del clients[key]
+        client.close()
+
+
+def udp_loop(port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", port))
+    logging.info("UDP forwarder listen 0.0.0.0:%d -> %s:%d",
+                 port, SSH_HOST, SSH_PORT)
+    while True:
+        try:
+            data, addr = sock.recvfrom(BUF)
+        except OSError:
+            continue
+        if not data:
+            continue
+        key = (addr, port)
+        with clients_lock:
+            client = clients.get(key)
+            if client is None or client.closed:
+                try:
+                    client = Client(addr, sock)
+                except OSError:
+                    continue
+                clients[key] = client
+                threading.Thread(target=tcp_reader, args=(client, key),
+                                 daemon=True).start()
+        client.send_to_tcp(data)
+
+
+def reaper():
+    while True:
+        time.sleep(30)
+        now = time.time()
+        with clients_lock:
+            for key, client in list(clients.items()):
+                if now - client.last > IDLE_TIMEOUT:
+                    del clients[key]
+                    client.close()
+
+
+def main():
+    threading.Thread(target=reaper, daemon=True).start()
+    threads = []
+    for port in UDP_PORTS:
+        t = threading.Thread(target=udp_loop, args=(port,), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+    if ! python3 -m py_compile /opt/vps-tunnel/udp-custom.py 2>/dev/null; then
+        error "udp-custom.py gagal dikompilasi — SSH UDP-HC / BadVPN tetap OFF."
+        return 1
     fi
-    mkdir -p /etc/udp-custom
+    # Bersihkan unit udp-custom lama (bila pernah dibuat) supaya tidak rebutan port.
     local p
     for p in 7100 7200 7300; do
-        printf '%s' "{\"listen\": \"127.0.0.1:${p}\", \"stream-buffer\": 2097152, \"receive-buffer\": 2097152, \"stream\": {\"mode\": \"udp\", \"server\": \"127.0.0.1:22\"}}" > "/etc/udp-custom/config-${p}.json"
-        cat > "/etc/systemd/system/udp-custom-${p}.service" <<EOF
+        if systemctl is-enabled "udp-custom-${p}" >/dev/null 2>&1 || [[ -f "/etc/systemd/system/udp-custom-${p}.service" ]]; then
+            systemctl stop "udp-custom-${p}" 2>/dev/null || true
+            systemctl disable "udp-custom-${p}" 2>/dev/null || true
+            rm -f "/etc/systemd/system/udp-custom-${p}.service"
+        fi
+    done
+    rm -f /etc/udp-custom/config-7100.json /etc/udp-custom/config-7200.json /etc/udp-custom/config-7300.json
+    cat > /etc/systemd/system/vps-udp.service <<EOF
 [Unit]
-Description=SSH UDP-HC ${p}
+Description=SSH UDP-HC / BadVPN (UDP 7100/7200/7300 -> SSH 22)
 After=network.target ssh.service
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/udp-custom server -exclude 1.1.1.1,8.8.8.8 -config /etc/udp-custom/config-${p}.json
+ExecStart=/usr/bin/python3 /opt/vps-tunnel/udp-custom.py
 Restart=always
 RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    done
     systemctl daemon-reload 2>/dev/null || true
-    for p in 7100 7200 7300; do
-        systemctl enable "udp-custom-${p}" 2>/dev/null || true
-        systemctl restart "udp-custom-${p}" 2>/dev/null || warn "udp-custom-${p} gagal start"
-    done
+    systemctl enable vps-udp 2>/dev/null || true
+    systemctl restart vps-udp 2>/dev/null || warn "vps-udp gagal start"
     ufw allow 7100/udp 2>/dev/null || true
     ufw allow 7200/udp 2>/dev/null || true
     ufw allow 7300/udp 2>/dev/null || true
@@ -1116,15 +1247,187 @@ EOF
     if (( ok == 3 )); then
         info "SSH UDP-HC jalan (UDP 7100/7200/7300 -> SSH 22)."
     else
-        warn "udp-custom hanya ${ok}/3 port yang LISTEN — cek: journalctl -u udp-custom-7100 -n 20"
+        warn "UDP forwarder hanya ${ok}/3 port yang LISTEN — cek: journalctl -u vps-udp -n 20"
         return 1
     fi
 }
 
 
-# Jembatan WebSocket -> TCP untuk SSH (dipakai HTTP Custom dkk via /ssh-ws).
-# Nginx hanya meneruskan upgrade WebSocket; yang mengubah frame WS menjadi TCP
-# mentah ke SSH 22 adalah proses ini (127.0.0.1:10090).
+setup_ohp() {
+    # HTTP tunnel (pengganti OHP / Open HTTP Puncher), dibuat sendiri (Python stdlib).
+    # Binary OHP tidak tersedia publik (repo 404, docs 403), jadi fungsinya
+    # ditulis ulang di sini: baca header HTTP, balas respons HTTP, lalu teruskan
+    # (TCP murni) ke SSH 22 (mode ssh, listen 8181) atau Dropbear 109 (mode
+    # dropbear, listen 8282). Dipakai HTTP Custom.
+    mkdir -p /opt/vps-tunnel
+    cat > /opt/vps-tunnel/ohp.py <<'PYEOF'
+#!/usr/bin/env python3
+"""HTTP tunnel (pengganti OHP / Open HTTP Puncher) — stdlib saja.
+
+Terima koneksi HTTP, baca header request, balas respons HTTP, lalu teruskan
+(murni TCP) ke backend: SSH 127.0.0.1:22 (mode ssh, listen 8181) atau
+Dropbear 127.0.0.1:109 (mode dropbear, listen 8282). Dipakai HTTP Custom.
+Dibuat sendiri karena binary OHP tidak tersedia publik (repo 404, docs 403).
+"""
+import argparse
+import logging
+import socket
+import threading
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
+
+
+def pump(src, dst, done, pair):
+    try:
+        while not done.is_set():
+            data = src.recv(16384)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    finally:
+        done.set()
+        for s in pair:
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+
+def handle(client, backend_host, backend_port):
+    try:
+        client.settimeout(15)
+        buf = b""
+        while b"\r\n\r\n" not in buf and len(buf) < 16384:
+            chunk = client.recv(4096)
+            if not chunk:
+                return
+            buf += chunk
+        if b"\r\n\r\n" not in buf:
+            return
+        head, rest = buf.split(b"\r\n\r\n", 1)
+        first = head.split(b"\r\n", 1)[0].decode("iso-8859-1", "replace")
+        method = first.split(" ", 1)[0].upper() if first else ""
+        if method == "CONNECT":
+            resp = b"HTTP/1.1 200 Connection Established\r\n\r\n"
+        elif (b"upgrade: websocket" in head.lower()
+                or b"connection: upgrade" in head.lower()):
+            resp = (b"HTTP/1.1 101 Switching Protocols\r\n"
+                    b"Upgrade: websocket\r\n"
+                    b"Connection: Upgrade\r\n\r\n")
+        else:
+            resp = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        backend = socket.create_connection((backend_host, backend_port),
+                                           timeout=10)
+        client.sendall(resp)
+        if rest:
+            backend.sendall(rest)
+        client.settimeout(None)
+        backend.settimeout(None)
+        done = threading.Event()
+        pair = (client, backend)
+        t1 = threading.Thread(target=pump, args=(client, backend, done, pair),
+                              daemon=True)
+        t2 = threading.Thread(target=pump, args=(backend, client, done, pair),
+                              daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+    except OSError:
+        pass
+    finally:
+        for s in (client,):
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=["ssh", "dropbear"], required=True)
+    ap.add_argument("--port", type=int, default=0)
+    args = ap.parse_args()
+    if args.mode == "ssh":
+        backend = ("127.0.0.1", 22)
+        port = args.port or 8181
+    else:
+        backend = ("127.0.0.1", 109)
+        port = args.port or 8282
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", port))
+    srv.listen(128)
+    logging.info("OHP %s listen 0.0.0.0:%d -> %s:%d",
+                 args.mode, port, backend[0], backend[1])
+    while True:
+        try:
+            client, _ = srv.accept()
+        except OSError:
+            continue
+        threading.Thread(target=handle, args=(client, backend[0], backend[1]),
+                         daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+    if ! python3 -m py_compile /opt/vps-tunnel/ohp.py 2>/dev/null; then
+        error "ohp.py gagal dikompilasi — OHP tetap OFF."
+        return 1
+    fi
+    cat > /etc/systemd/system/ohp-ssh.service <<EOF
+[Unit]
+Description=OHP SSH (HTTP tunnel 8181 -> SSH 22)
+After=network.target ssh.service
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/vps-tunnel/ohp.py --mode ssh
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+    cat > /etc/systemd/system/ohp-dropbear.service <<EOF
+[Unit]
+Description=OHP Dropbear (HTTP tunnel 8282 -> Dropbear 109)
+After=network.target ssh.service dropbear.service
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/vps-tunnel/ohp.py --mode dropbear
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable ohp-ssh 2>/dev/null || true
+    systemctl enable ohp-dropbear 2>/dev/null || true
+    systemctl restart ohp-ssh 2>/dev/null || warn "ohp-ssh gagal start"
+    systemctl restart ohp-dropbear 2>/dev/null || warn "ohp-dropbear gagal start"
+    ufw allow 8181/tcp 2>/dev/null || true
+    ufw allow 8282/tcp 2>/dev/null || true
+    sleep 1
+    local ok=0
+    port_tcp 8181 && ok=$((ok+1))
+    port_tcp 8282 && ok=$((ok+1))
+    if (( ok == 2 )); then
+        info "OHP jalan (SSH 8181 -> SSH 22, Dropbear 8282 -> Dropbear 109)."
+    else
+        warn "OHP hanya ${ok}/2 port yang LISTEN — cek: journalctl -u ohp-ssh -n 20 / journalctl -u ohp-dropbear -n 20"
+        return 1
+    fi
+    if ! port_tcp 109; then
+        warn "Dropbear (port 109) belum LISTEN — OHP Dropbear (8282) sudah jalan tapi belum bisa dipakai sampai Dropbear aktif (menu 12 > 27 memperbaikinya)."
+    fi
+}
+
+
 setup_ws_epro() {
     if python3 -c "import websockets" 2>/dev/null; then
         info "Modul websockets sudah ada."
@@ -1333,6 +1636,10 @@ do_install() {
     setup_ufw "$mode"
     setup_cron_expired
     install_self
+    # SSH UDP-HC (BadVPN 7100/7200/7300) + OHP (SSH 8181, Dropbear 8282) —
+    # wajib supaya akun jalan di HTTP Custom; non-blocking bila gagal.
+    setup_udp_forward || true
+    setup_ohp || true
     apply_xray || return 1
     echo
     info "Instalasi selesai — mode: ${mode}"
@@ -1884,6 +2191,10 @@ do_uninstall() {
     systemctl disable ws-epro 2>/dev/null || true
     rm -f /etc/systemd/system/ws-epro.service
     rm -rf /opt/ws-epro
+    systemctl stop vps-udp ohp-ssh ohp-dropbear 2>/dev/null || true
+    systemctl disable vps-udp ohp-ssh ohp-dropbear 2>/dev/null || true
+    rm -f /etc/systemd/system/vps-udp.service /etc/systemd/system/ohp-ssh.service /etc/systemd/system/ohp-dropbear.service
+    rm -rf /opt/vps-tunnel
     systemctl stop vps-bot 2>/dev/null || true
     systemctl disable vps-bot 2>/dev/null || true
     rm -f "$BOT_UNIT" "$BOT_CONF"
@@ -3514,7 +3825,7 @@ feat_fix_all_services() {
     fi
     if ! chk_ssh_udp || ! chk_badvpn7100 || ! chk_badvpn7200 || ! chk_badvpn7300; then
         info "[SSH UDP-HC / BadVPN] ada yang OFF — setup udp-custom..."
-        setup_udp_custom || warn "[SSH UDP-HC / BadVPN] setup gagal (lihat pesan di atas)."
+        setup_udp_forward || warn "[SSH UDP-HC / BadVPN] setup gagal (lihat pesan di atas)."
     fi
     if ! chk_wsepro; then
         info "[WS ePRO] OFF — jalankan Fixx WS ePRO..."
@@ -3550,8 +3861,12 @@ feat_fix_all_services() {
     if ! chk_ovpn_ssl || ! chk_ovpn_wsssl || ! chk_ovpn_udp || ! chk_ovpn_tcp; then
         warn "[OpenVPN] belum terpasang — vps-manager belum menginstall server OpenVPN (SSL/WS-SSL/UDP/TCP). Bila mau dipasang, minta 'tambah OpenVPN'."
     fi
-    if ! chk_ohp_ssh || ! chk_ohp_dropbear || ! chk_ohp_ovpn; then
-        warn "[OHP] belum terpasang — vps-manager belum menginstall OHP (varian OHP OpenVPN juga butuh server OpenVPN). Bila mau dipasang, minta 'tambah OHP'."
+    if ! chk_ohp_ssh || ! chk_ohp_dropbear; then
+        info "[OHP SSH / Dropbear] ada yang OFF — setup OHP (SSH 8181 + Dropbear 8282)..."
+        setup_ohp || warn "[OHP] setup gagal (lihat pesan di atas)."
+    fi
+    if ! chk_ohp_ovpn; then
+        warn "[OHP OpenVPN] tetap OFF — butuh server OpenVPN (belum dipasang). Minta 'tambah OpenVPN' bila mau."
     fi
     echo
     echo "=== Hasil sesudah perbaikan ==="
