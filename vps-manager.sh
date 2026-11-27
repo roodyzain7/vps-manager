@@ -436,16 +436,20 @@ build_xray_config() {
     reality_sid=$(state_get '.install.reality.short_id // ""')
     reality_dest=$(state_get '.install.reality.dest // "www.microsoft.com"')
     reality_sni=$(state_get '.install.reality.sni // "www.microsoft.com"')
+    # Akun trial yang sudah habis (trial_until lewat) tidak ikut ke config
+    # Xray — pertahanan kedua selain cron 5-menit yang menghapusnya.
+    local now_epoch
+    now_epoch=$(date +%s)
 
-    vmess_clients=$(jq -c '[.accounts[] | select(.protocol=="vmess" and .status=="active")
+    vmess_clients=$(jq -c --argjson now "$now_epoch" '[.accounts[] | select(.protocol=="vmess" and .status=="active" and ((.trial_until // 9999999999) > $now))
         | {id: .uuid, alterId: 0, email: .name}]' "$STATE_FILE")
-    vless_clients=$(jq -c '[.accounts[] | select(.protocol=="vless" and .status=="active")
+    vless_clients=$(jq -c --argjson now "$now_epoch" '[.accounts[] | select(.protocol=="vless" and .status=="active" and ((.trial_until // 9999999999) > $now))
         | {id: .uuid, email: .name}
           + (if (.transport // "ws") == "tcp" then {flow: "xtls-rprx-vision"} else {} end)]' "$STATE_FILE")
-    trojan_clients=$(jq -c '[.accounts[] | select(.protocol=="trojan" and .status=="active")
+    trojan_clients=$(jq -c --argjson now "$now_epoch" '[.accounts[] | select(.protocol=="trojan" and .status=="active" and ((.trial_until // 9999999999) > $now))
         | {password: .password, email: .name}]' "$STATE_FILE")
 
-    ss_clients=$(jq -c '[.accounts[] | select(.protocol=="ss" and .status=="active")
+    ss_clients=$(jq -c --argjson now "$now_epoch" '[.accounts[] | select(.protocol=="ss" and .status=="active" and ((.trial_until // 9999999999) > $now))
         | {password: .password, method: (.method // "aes-256-gcm"), email: .name}]' "$STATE_FILE")
 
     mkdir -p "$(dirname "$XRAY_CONFIG")"
@@ -949,6 +953,8 @@ setup_cron_expired() {
     cat > "$CRON_FILE" <<EOF
 # vps-manager: cek akun expired setiap hari jam 02:00 WIB
 0 2 * * * root ${INSTALL_BIN} --check-expired >> ${LOG_FILE} 2>&1
+# vps-manager: hapus akun trial yang habis (tiap 5 menit)
+*/5 * * * * root ${INSTALL_BIN} --check-trials >> ${LOG_FILE} 2>&1
 EOF
     chmod 644 "$CRON_FILE"
     info "Cron harian dipasang: ${CRON_FILE}"
@@ -1859,21 +1865,144 @@ create_ss() {
     show_link "ss" "$name"
 }
 
+# -----------------------------------------------------------------------------
+# Akun trial: akun sekali pakai untuk tes, 30 menit atau 1 jam, lalu dihapus
+# otomatis (cron tiap 5 menit + saat list). Nama acak trial-xxxxxx, tanpa
+# perlu isi nama/hari/password manual — sekali pilih langsung jadi + link.
+# -----------------------------------------------------------------------------
+create_account() { # $1=proto — panggil create_* interaktif (menu Buat Akun)
+    case "$1" in
+        ssh) create_ssh ;;
+        vmess) create_vmess ;;
+        vless) create_vless ;;
+        trojan) create_trojan ;;
+        ss) create_ss ;;
+        *) error "Protokol tidak valid: $1"; return 1 ;;
+    esac
+}
+
+create_trial() {
+    # $1=proto $2=menit (30|60)
+    local proto="${1:-}" minutes="${2:-}"
+    case "$proto" in ssh|vmess|vless|trojan|ss) ;; *) error "Protokol trial tidak valid: $proto"; return 1 ;; esac
+    case "$minutes" in 30|60) ;; *) error "Trial hanya 30 atau 60 menit."; return 1 ;; esac
+    # Pastikan cron penghapus trial ada, tanpa harus install ulang (menu 1).
+    setup_cron_expired
+    # Nama trial acak (trial-xxxxxx), unik per protokol.
+    local name="" tries=0
+    while true; do
+        name="trial-$(openssl rand -hex 3)"
+        if ! state_account_exists "$proto" "$name"; then
+            if [[ "$proto" != "ssh" ]] || ! id "$name" >/dev/null 2>&1; then
+                break
+            fi
+        fi
+        tries=$((tries+1))
+        (( tries > 20 )) && { error "Gagal membuat nama trial unik."; return 1; }
+    done
+    local password=""
+    case "$proto" in
+        ssh) password=$(random_password 12) ;;
+        trojan|ss) password=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20) ;;
+    esac
+    # Buat akun 1 hari via create_* (stdin /dev/null agar prompt opsional
+    # seperti Limit IP tidak muncul — trial harus sekali jadi).
+    local created=0
+    case "$proto" in
+        ssh)    if create_ssh "$name" 1 "$password" </dev/null; then created=1; fi ;;
+        vmess)  if create_vmess "$name" 1 "" </dev/null; then created=1; fi ;;
+        vless)  if create_vless "$name" 1 "" "" </dev/null; then created=1; fi ;;
+        trojan) if create_trojan "$name" 1 "$password" </dev/null; then created=1; fi ;;
+        ss)     if create_ss "$name" 1 "$password" </dev/null; then created=1; fi ;;
+    esac
+    (( created == 1 )) || { error "Gagal membuat akun trial ${proto}."; return 1; }
+    # Tandai sebagai trial: habis dalam X menit (epoch), expiry tanggal
+    # dipangkas ke hari ini sebagai pengaman (cron harian akan menandainya
+    # expired besok bila cron trial gagal).
+    local until_epoch
+    until_epoch=$(( $(date +%s) + minutes * 60 ))
+    jq_state --arg p "$proto" --arg n "$name" --argjson until "$until_epoch" \
+        --arg today "$(today_iso)" \
+        '.accounts |= map(if .protocol==$p and .name==$n then .trial=true | .trial_until=$until | .expiry=$today else . end)' \
+        || { error "Gagal menandai trial — akun ${name} jadi akun biasa 1 hari."; return 1; }
+    echo
+    info "TRIAL ${proto} dibuat: ${name} — aktif ${minutes} menit (sampai $(date -d "@${until_epoch}" '+%H:%M')), lalu dihapus otomatis."
+}
+
+check_trials_quiet() {
+    # Hapus akun trial yang trial_until-nya sudah lewat. Untuk SSH, user
+    # Linux-nya juga dihapus. Config Xray dibangun ulang bila ada yang dihapus.
+    local now_epoch
+    now_epoch=$(date +%s)
+    local removed=0 need_xray=0
+    local proto name
+    while IFS=$'\t' read -r proto name; do
+        if [[ "$proto" == "ssh" ]]; then
+            if id "$name" >/dev/null 2>&1; then
+                userdel -r "$name" 2>/dev/null || userdel "$name" 2>/dev/null || true
+            fi
+        else
+            need_xray=1
+        fi
+        state_del_account "$proto" "$name"
+        log "INFO" "Akun trial ${proto}/${name} habis — dihapus."
+        removed=1
+    done < <(jq -r --argjson now "$now_epoch" \
+        '.accounts[] | select((.trial // false) == true and (.trial_until // 9999999999) < $now) | [.protocol, .name] | @tsv' "$STATE_FILE")
+    if (( removed == 1 )) && (( need_xray == 1 )); then
+        apply_xray || warn "Gagal menerapkan config setelah hapus trial."
+    fi
+}
+
+check_trials() {
+    info "Mengecek akun trial yang habis..."
+    check_trials_quiet
+    info "Selesai."
+}
+
+submenu_create() {
+    # $1=proto $2=label — submenu Buat Akun: akun biasa atau Trial 30 mnt / 1 jam.
+    local proto="$1" label="$2"
+    while true; do
+        echo "================= BUAT AKUN ${label} ================="
+        echo "  1) Buat Akun (masa aktif hari)"
+        echo "  2) Trial 30 menit"
+        echo "  3) Trial 1 jam"
+        echo "  0) Kembali"
+        echo "----------------------------------------------------------"
+        local pilih=""
+        read -r -p "Pilih [0-3]: " pilih || return 0
+        case "$pilih" in
+            1) create_account "$proto"; return 0 ;;
+            2) create_trial "$proto" 30; return 0 ;;
+            3) create_trial "$proto" 60; return 0 ;;
+            0) return 0 ;;
+            *) error "Pilihan tidak valid: ${pilih}" ;;
+        esac
+    done
+}
+
 
 # -----------------------------------------------------------------------------
 # List, hapus, perpanjang
 # -----------------------------------------------------------------------------
 list_accounts() {
     check_expired_quiet
-    local total
+    local total now_epoch
+    now_epoch=$(date +%s)
     total=$(jq -r '.accounts | length' "$STATE_FILE")
     echo "================= DAFTAR AKUN (${total}) ================="
     printf '%-8s %-18s %-12s %-10s %-8s\n' "PROTOKOL" "NAMA" "EXPIRED" "STATUS" "LIMIT-IP"
     echo "----------------------------------------------------------"
-    jq -r '.accounts | sort_by(.expiry)[] | [.protocol, .name, .expiry, .status, (.limit_ip // "-" | tostring)] | @tsv' "$STATE_FILE" \
-        | while IFS=$'\t' read -r proto name exp status lip; do
+    jq -r '.accounts | sort_by(.expiry)[] | [.protocol, .name, .expiry, .status, (.limit_ip // "-" | tostring), (.trial_until // 0)] | @tsv' "$STATE_FILE" \
+        | while IFS=$'\t' read -r proto name exp status lip trial_until; do
             local mark=""
             if is_expired "$exp" && [[ "$status" == "active" ]]; then mark=" (LEWAT!)"; fi
+            if [[ "$trial_until" != "0" && -n "$trial_until" ]]; then
+                local remain=$(( (trial_until - now_epoch) / 60 ))
+                (( remain < 0 )) && remain=0
+                mark="${mark} (TRIAL, sisa ${remain} mnt)"
+            fi
             printf '%-8s %-18s %-12s %-10s %-8s%s\n' "$proto" "$name" "$exp" "$status" "$lip" "$mark"
         done
     echo "----------------------------------------------------------"
@@ -1979,6 +2108,10 @@ renew_account() {
     new_exp=$(expiry_plus "$base" "$days")
     state_set_field "$proto" "$name" "expiry" "$new_exp"
     state_set_field "$proto" "$name" "status" "active"
+    # Bila yang diperpanjang adalah akun trial, jadikan akun biasa
+    # (hapus penanda trial agar tidak ikut terhapus oleh cron trial).
+    jq_state --arg p "$proto" --arg n "$name" \
+        '.accounts |= map(if .protocol==$p and .name==$n then del(.trial, .trial_until) else . end)' || true
     if [[ "$proto" == "ssh" ]]; then
         chage -E "$new_exp" "$name" 2>/dev/null || warn "chage gagal untuk ${name} — cek user masih ada."
         # Buka kunci bila sebelumnya terkunci karena expired.
@@ -1994,6 +2127,8 @@ renew_account() {
 # Dipanggil saat list & via cron harian. Versi quiet dipakai internal.
 # -----------------------------------------------------------------------------
 check_expired_quiet() {
+    # Hapus dulu akun trial yang sudah habis (per-menit), baru cek expiry harian.
+    check_trials_quiet
     local today
     today=$(today_iso)
     local changed=0
@@ -4023,10 +4158,10 @@ menu_loop() {
         # script langsung lompat ke prompt shell seperti yang dilaporkan user.
         case "$pilih" in
             1)  do_install || warn "Menu 1 tidak selesai — kembali ke menu." ;;
-            2)  create_ssh || warn "Buat akun SSH tidak selesai — kembali ke menu." ;;
-            3)  create_vmess || warn "Buat akun VMess tidak selesai — kembali ke menu." ;;
-            4)  create_vless || warn "Buat akun VLESS tidak selesai — kembali ke menu." ;;
-            5)  create_trojan || warn "Buat akun Trojan tidak selesai — kembali ke menu." ;;
+            2)  submenu_create ssh "SSH" || warn "Buat akun SSH tidak selesai — kembali ke menu." ;;
+            3)  submenu_create vmess "VMess" || warn "Buat akun VMess tidak selesai — kembali ke menu." ;;
+            4)  submenu_create vless "VLESS" || warn "Buat akun VLESS tidak selesai — kembali ke menu." ;;
+            5)  submenu_create trojan "Trojan" || warn "Buat akun Trojan tidak selesai — kembali ke menu." ;;
             6)  list_accounts || warn "List akun gagal — kembali ke menu." ;;
             7)  delete_account || warn "Hapus akun tidak selesai — kembali ke menu." ;;
             8)  renew_account || warn "Perpanjang tidak selesai — kembali ke menu." ;;
@@ -4034,7 +4169,7 @@ menu_loop() {
             10) do_uninstall || warn "Uninstall tidak selesai — kembali ke menu." ;;
             11) submenu_bot || warn "Menu bot tidak selesai — kembali ke menu." ;;
             12) submenu_features || warn "Menu features tidak selesai — kembali ke menu." ;;
-            13) create_ss || warn "Buat akun Shadowsocks tidak selesai — kembali ke menu." ;;
+            13) submenu_create ss "Shadowsocks" || warn "Buat akun Shadowsocks tidak selesai — kembali ke menu." ;;
             0)  echo "Sampai jumpa!"; exit 0 ;;
             *)  error "Pilihan tidak valid: ${pilih}" ;;
         esac
@@ -4192,6 +4327,8 @@ PENGGUNAAN:
   bash vps-manager.sh --show   --protocol vless --name user1
   bash vps-manager.sh --check          Cek rantai koneksi Nginx -> Xray -> path WS
   bash vps-manager.sh --check-expired
+  bash vps-manager.sh --check-trials         Hapus akun trial yang habis
+  bash vps-manager.sh --trial vmess --minutes 30   Buat akun trial (30/60 menit)
   bash vps-manager.sh --uninstall
 EOF
 }
@@ -4218,7 +4355,7 @@ main() {
         return 0
     fi
 
-    local cmd="" mode="" domain="" email="" proto="" name="" days="" password="" transport="" limit_ip="" bot_token="" admin_chat_id=""
+    local cmd="" mode="" domain="" email="" proto="" name="" days="" password="" transport="" limit_ip="" bot_token="" admin_chat_id="" minutes=""
     while (( $# > 0 )); do
         case "$1" in
             --help|-h) print_help; exit 0 ;;
@@ -4229,6 +4366,9 @@ main() {
             --renew) cmd="renew"; shift ;;
             --show) cmd="show"; shift ;;
             --check-expired) cmd="check-expired"; shift ;;
+            --check-trials) cmd="check-trials"; shift ;;
+            --trial) cmd="trial"; proto="${2:-}"; shift 2 ;;
+            --minutes) minutes="${2:-}"; shift 2 ;;
             --check) cmd="check"; shift ;;
             --setup-bot) cmd="setup-bot"; shift ;;
             --bot-check) cmd="bot-check"; shift ;;
@@ -4271,6 +4411,8 @@ main() {
         renew) renew_account "$proto" "$name" "$days" ;;
         show) show_link "$proto" "$name" ;;
         check-expired) check_expired ;;
+        check-trials) check_trials ;;
+        trial) create_trial "$proto" "$minutes" ;;
         check) do_check ;;
         setup-bot) setup_bot "$bot_token" "$admin_chat_id" ;;
         bot-check) bot_check ;;

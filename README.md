@@ -120,6 +120,27 @@ Kota/ISP diambil sekali dari ipinfo.io lalu disimpan di state (tidak
 menghambat menu berikutnya). Traffic MONTH/DAY dibaca dari `vnstat` bila
 terpasang (`apt install vnstat`); bila belum, tampil total sejak boot.
 
+## Akun Trial (30 menit / 1 jam)
+
+Menu **Buat Akun SSH / VMess / VLESS / Trojan / Shadowsocks** (2, 3, 4, 5, 13)
+kini membuka submenu:
+
+```
+================= BUAT AKUN VMess =================
+  1) Buat Akun (masa aktif hari)
+  2) Trial 30 menit
+  3) Trial 1 jam
+  0) Kembali
+```
+
+Trial membuat akun sekali pakai bernama `trial-xxxxxx` (acak, tanpa perlu
+isi nama/hari/password) dan langsung menampilkan link-nya, sama seperti
+akun biasa. Akun trial **dihapus otomatis** begitu waktunya habis — cron
+tiap 5 menit (`--check-trials`) menghapusnya dari state + config Xray, dan
+untuk SSH user Linux-nya ikut dihapus. Di menu 6 (List) akun trial ditandai
+`(TRIAL, sisa 25 mnt)`. Bila trial diperpanjang di menu 8, ia berubah jadi
+akun biasa (penanda trial hilang).
+
 ## Features (menu 12)
 
 Submenu perbaikan dan utilitas, seperti menu FEATURES di screenshot
@@ -222,6 +243,11 @@ bash vps-manager.sh --create vmess  --name user1 --days 30 --limit-ip 2
 bash vps-manager.sh --create vless  --name user1 --days 30 --transport ws
 bash vps-manager.sh --create trojan --name user1 --days 30
 bash vps-manager.sh --create ss     --name user1 --days 30 --password Rahasia123
+
+# Akun trial (30/60 menit, nama acak trial-xxxxxx, dihapus otomatis bila habis)
+bash vps-manager.sh --trial vmess --minutes 30
+bash vps-manager.sh --trial ssh --minutes 60
+bash vps-manager.sh --check-trials
 
 # Lihat / hapus / perpanjang / tampilkan link
 bash vps-manager.sh --list
