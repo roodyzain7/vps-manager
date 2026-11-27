@@ -821,6 +821,21 @@ write_nginx_conf() {
     vless_path=$(state_get '.install.ws_paths.vless')
     trojan_path=$(state_get '.install.ws_paths.trojan')
 
+    # Nginx TIDAK boleh lagi listen 80/443 (milik HAProxy). Tapi paket Nginx
+    # Ubuntu membawa site default (/etc/nginx/sites-enabled/default, listen
+    # 80) dan install lama bisa meninggalkan file lain yang listen 80/443.
+    # Bila ada yang tersisa, Nginx gagal start: "bind() to 0.0.0.0:80
+    # failed" (persis 27 Nov 2026) — padahal nginx -t lolos. Bersihkan:
+    # hapus site default, dan pindahkan file lain yang listen 80/443 ke
+    # backup (bukan dihapus) supaya tidak bentrok dengan HAProxy.
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    local other f
+    other=$(grep -rlE 'listen[[:space:]]+(\[::\]:)?(80|443)([[:space:]]|;)' /etc/nginx/conf.d /etc/nginx/sites-enabled 2>/dev/null | grep -v "^${NGINX_CONF}$" || true)
+    for f in $other; do
+        warn "Config Nginx lain masih listen 80/443: ${f} — dipindah ke backup supaya HAProxy bisa pegang 80/443."
+        mv "$f" "${f}.vps-manager-bak-$(date '+%Y%m%d-%H%M')" 2>/dev/null || true
+    done
+
     cat > "$NGINX_CONF" <<EOF
 # vps-manager — Nginx internal (dibuat otomatis, jangan edit manual).
 # Domain: ${domain}
@@ -3975,6 +3990,15 @@ feat_fix_haproxy() {
 }
 feat_fix_nginx() {
     echo "=== Fixx Nginx ==="
+    # Bersihkan config lain yang masih listen 80/443 (site default Ubuntu
+    # dsb.) — kalau tidak, Nginx gagal start "bind() to 0.0.0.0:80 failed".
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    local other2 f2
+    other2=$(grep -rlE 'listen[[:space:]]+(\[::\]:)?(80|443)([[:space:]]|;)' /etc/nginx/conf.d /etc/nginx/sites-enabled 2>/dev/null | grep -v "^${NGINX_CONF}$" || true)
+    for f2 in $other2; do
+        warn "Config Nginx lain masih listen 80/443: ${f2} — dipindah ke backup."
+        mv "$f2" "${f2}.vps-manager-bak-$(date '+%Y%m%d-%H%M')" 2>/dev/null || true
+    done
     if nginx -t 2>&1; then
         info "Config Nginx valid."
     else
