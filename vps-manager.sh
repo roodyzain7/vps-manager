@@ -3819,7 +3819,31 @@ haproxy_fix_bind() {
             return 1
         fi
         if [[ "$port" == "443" || "$port" == "80" ]]; then
-            error "Port ${port} bentrok dengan Nginx (port itu milik Nginx, bukan HAProxy). Config HAProxy salah — update script ke versi terbaru lalu ulangi Fixx Haproxy."
+            # Port 80/443 SEHARUSNYA milik HAProxy (arsitektur baru). Bila
+            # yang memegang adalah Nginx, berarti migrasi Nginx ke internal
+            # belum jalan — perbaiki sekarang, bukan menyerah: tulis ulang
+            # config Nginx internal, stop Nginx, start HAProxy, start Nginx.
+            holder=$(port_holder "$port" 2>/dev/null || echo "?")
+            if [[ "$holder" == *nginx* ]]; then
+                warn "Port ${port} masih dipegang Nginx — migrasi ke internal ${NGINX_INTERNAL_PORT} belum jalan. Memperbaiki..."
+                local domain
+                domain=$(state_get '.install.domain // ""')
+                if [[ -n "$domain" ]]; then
+                    backup_config
+                    write_nginx_conf "$domain" || return 1
+                fi
+                systemctl stop nginx 2>/dev/null || true
+                local i
+                for i in $(seq 1 10); do
+                    port_tcp 80 || port_tcp 443 || break
+                    sleep 1
+                done
+                systemctl restart haproxy 2>/dev/null || true
+                sleep 2
+                systemctl start nginx 2>/dev/null || true
+                continue
+            fi
+            error "Port ${port} dipakai oleh ${holder} (bukan Nginx) — bebaskan dulu, lalu jalankan Fixx Haproxy."
             return 1
         fi
         if [[ -t 0 ]]; then
@@ -3862,8 +3886,17 @@ setup_haproxy() {
         warn "Nginx masih memegang 80/443 — memindahkan ke port internal ${NGINX_INTERNAL_PORT}..."
         backup_config
         write_nginx_conf "$domain" || return 1
-        systemctl reload nginx 2>/dev/null || systemctl restart nginx
-        sleep 1
+        # reload saja TIDAK cukup: worker lama bisa tetap memegang listen
+        # socket 80/443 sampai koneksi lama tutup, lalu HAProxy gagal bind
+        # ("cannot bind socket", persis 27 Nov 2026). Stop penuh supaya port
+        # benar-benar bebas; Nginx dinyalakan lagi sesudah HAProxy jalan
+        # (di internal 18080).
+        systemctl stop nginx 2>/dev/null || true
+        local i
+        for i in $(seq 1 10); do
+            port_tcp 80 || port_tcp 443 || break
+            sleep 1
+        done
     fi
     # Sertifikat .pem untuk terminasi TLS 443 (mode domain saja; REALITY tak ada cert).
     if ! haproxy_sync_cert; then
@@ -3892,6 +3925,9 @@ setup_haproxy() {
     sleep 2
     if haproxy_is_up; then
         info "HAProxy jalan (80/443: SSH mentah + WS; multiport: 55, 8080, 8880, 2082, 2086, 2095, 222-442 + 444-1000 HTTP + 9444 TLS)."
+        # Nginx (internal 18080) harus jalan lagi bila tadi di-stop untuk
+        # membebaskan 80/443.
+        systemctl start nginx 2>/dev/null || true
     else
         haproxy_status_diag
         haproxy_fix_bind
