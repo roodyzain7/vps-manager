@@ -194,6 +194,21 @@ output ditangkap program lain (mis. bot Telegram), tidak ada escape
 sequence yang ikut terkirim — pesan bot tetap bersih. Untuk akun trial,
 "Expired On" menampilkan tanggal + jam habisnya.
 
+**Akun SSH menampilkan SSH Tunnel WebSocket untuk HTTP Custom.** Di
+bawah CONFIG DETAILS ada bagian `SSH TUNNEL WEBSOCKET (HTTP CUSTOM)`:
+
+```
+SSH TUNNEL WEBSOCKET (HTTP CUSTOM)
+WS NTLS    : sg1.roodyzain.web.id:80 (path /ssh-ws)
+WS TLS/SNI : sg1.roodyzain.web.id:443 (path /ssh-ws, SNI sg1.roodyzain.web.id)
+```
+
+Di HTTP Custom: **non-TLS pakai port 80**, **TLS/SNI pakai port 443**,
+path `/ssh-ws`. Jalurnya sudah disiapkan script: Nginx `/ssh-ws` di
+port 80 dan 443 → jembatan ws-epro (`127.0.0.1:10090`) → SSH port 22.
+`ssh` standar dari terminal tetap pakai port **22** (port 80/443 itu
+WebSocket, bukan SSH mentah).
+
 **Bot Telegram menampilkan format yang sama.** Karena bot menjalankan
 CLI yang sama, hasil buat akun / link akun di bot juga format CEK AKUN.
 Bedanya, bot membungkus hasil CLI dalam blok monospace (`<pre>`) supaya

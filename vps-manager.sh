@@ -1790,8 +1790,11 @@ create_ssh() {
     echo "Port       : 22"
     echo "Username   : ${name}"
     echo "Password   : ${password}   <-- simpan sekarang, password TIDAK disimpan di server"
-    echo "SSH WS     : ${addr}:80 dan ${addr}:443 (path /ssh-ws, via ws-epro)"
     echo "Perintah   : ssh ${name}@${addr}"
+    echo "----------------------------------------"
+    echo "SSH TUNNEL WEBSOCKET (HTTP CUSTOM)"
+    echo "WS NTLS    : ${addr}:80 (path /ssh-ws)"
+    echo "WS TLS/SNI : ${addr}:443 (path /ssh-ws, SNI ${addr})"
     echo "----------------------------------------"
 }
 
@@ -2285,8 +2288,11 @@ show_link() {
             echo "Port       : 22"
             echo "Username   : ${name}"
             echo "Password   : (sudah ditampilkan sekali saat dibuat — bila lupa, reset manual: passwd ${name})"
-            echo "SSH WS     : ${addr}:80 dan ${addr}:443 (path /ssh-ws, via ws-epro)"
             echo "Perintah   : ssh ${name}@${addr}"
+            echo "----------------------------------------"
+            echo "SSH TUNNEL WEBSOCKET (HTTP CUSTOM)"
+            echo "WS NTLS    : ${addr}:80 (path /ssh-ws)"
+            echo "WS TLS/SNI : ${addr}:443 (path /ssh-ws, SNI ${addr})"
             echo "----------------------------------------"
             return 0
             ;;
