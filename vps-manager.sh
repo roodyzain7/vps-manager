@@ -80,6 +80,8 @@ readonly OVPN_SSL_SUBNET="10.10.0.0"
 # dipakai WS-SSL tapi TCP/UDP tidak bentrok (protokol berbeda).
 readonly OVPN_UDP_PORT=1194
 readonly OVPN_UDP_SUBNET="10.11.0.0"
+# OHP OpenVPN: HTTP tunnel 8383 -> OpenVPN SSL 127.0.0.1:1195.
+readonly OHP_OVPN_PORT=8383
 readonly OVPN_DIR="/etc/openvpn/server"
 readonly OVPN_WS_DIR="/opt/ws-ovpn"
 
@@ -1280,8 +1282,9 @@ setup_ohp() {
 """HTTP tunnel (pengganti OHP / Open HTTP Puncher) — stdlib saja.
 
 Terima koneksi HTTP, baca header request, balas respons HTTP, lalu teruskan
-(murni TCP) ke backend: SSH 127.0.0.1:22 (mode ssh, listen 8181) atau
-Dropbear 127.0.0.1:109 (mode dropbear, listen 8282). Dipakai HTTP Custom.
+(murni TCP) ke backend: SSH 127.0.0.1:22 (mode ssh, listen 8181), Dropbear
+127.0.0.1:109 (mode dropbear, listen 8282), atau OpenVPN SSL 127.0.0.1:1195
+(mode openvpn, listen 8383). Dipakai HTTP Custom.
 Dibuat sendiri karena binary OHP tidak tersedia publik (repo 404, docs 403).
 """
 import argparse
@@ -1363,15 +1366,19 @@ def handle(client, backend_host, backend_port):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["ssh", "dropbear"], required=True)
+    ap.add_argument("--mode", choices=["ssh", "dropbear", "openvpn"],
+                    required=True)
     ap.add_argument("--port", type=int, default=0)
     args = ap.parse_args()
     if args.mode == "ssh":
         backend = ("127.0.0.1", 22)
         port = args.port or 8181
-    else:
+    elif args.mode == "dropbear":
         backend = ("127.0.0.1", 109)
         port = args.port or 8282
+    else:  # openvpn -> OpenVPN SSL (TCP 1195)
+        backend = ("127.0.0.1", 1195)
+        port = args.port or 8383
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))
@@ -1420,21 +1427,55 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+    # OHP OpenVPN (HTTP tunnel 8383 -> OpenVPN SSL 1195). Hanya dipasang
+    # bila server OpenVPN sudah ada — kalau belum, backend-nya belum ada
+    # jadi service-nya tidak dibuat (jujur OFF, bukan ON palsu).
+    local ovpn_ok=0
+    if [[ -f "$OVPN_DIR/ssl.conf" ]] || chk_ovpn_ssl 2>/dev/null; then
+        ovpn_ok=1
+        cat > /etc/systemd/system/ohp-openvpn.service <<EOF
+[Unit]
+Description=OHP OpenVPN (HTTP tunnel 8383 -> OpenVPN SSL 1195)
+After=network.target openvpn-server@ssl.service
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/vps-tunnel/ohp.py --mode openvpn
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+    else
+        warn "Server OpenVPN belum ada — OHP OpenVPN dilewati (pasang dulu via menu 12 -> 28)."
+    fi
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable ohp-ssh 2>/dev/null || true
     systemctl enable ohp-dropbear 2>/dev/null || true
     systemctl restart ohp-ssh 2>/dev/null || warn "ohp-ssh gagal start"
     systemctl restart ohp-dropbear 2>/dev/null || warn "ohp-dropbear gagal start"
+    if (( ovpn_ok == 1 )); then
+        systemctl enable ohp-openvpn 2>/dev/null || true
+        systemctl restart ohp-openvpn 2>/dev/null || warn "ohp-openvpn gagal start"
+    fi
     ufw allow 8181/tcp 2>/dev/null || true
     ufw allow 8282/tcp 2>/dev/null || true
+    if (( ovpn_ok == 1 )); then ufw allow 8383/tcp 2>/dev/null || true; fi
     sleep 1
     local ok=0
     port_tcp 8181 && ok=$((ok+1))
     port_tcp 8282 && ok=$((ok+1))
-    if (( ok == 2 )); then
-        info "OHP jalan (SSH 8181 -> SSH 22, Dropbear 8282 -> Dropbear 109)."
+    if (( ovpn_ok == 1 )); then port_tcp 8383 && ok=$((ok+1)); fi
+    local want=2
+    (( ovpn_ok == 1 )) && want=3
+    if (( ok == want )); then
+        if (( ovpn_ok == 1 )); then
+            info "OHP jalan (SSH 8181 -> SSH 22, Dropbear 8282 -> Dropbear 109, OpenVPN 8383 -> OpenVPN SSL 1195)."
+        else
+            info "OHP jalan (SSH 8181 -> SSH 22, Dropbear 8282 -> Dropbear 109)."
+        fi
     else
-        warn "OHP hanya ${ok}/2 port yang LISTEN — cek: journalctl -u ohp-ssh -n 20 / journalctl -u ohp-dropbear -n 20"
+        warn "OHP hanya ${ok}/${want} port yang LISTEN — cek: journalctl -u ohp-ssh -n 20 / journalctl -u ohp-dropbear -n 20 / journalctl -u ohp-openvpn -n 20"
         return 1
     fi
     if ! port_tcp 109; then
@@ -1907,6 +1948,9 @@ EOF
     else
         warn "OpenVPN UDP masih OFF menurut Running Service — cek: systemctl status openvpn-server@udp"
     fi
+    # OHP OpenVPN (8383 -> OpenVPN SSL 1195): backend-nya kini ada, jadi
+    # (re)jalankan setup_ohp supaya service-nya ikut terpasang.
+    setup_ohp || warn "OHP OpenVPN gagal dipasang — OpenVPN tetap jalan; coba menu 12 -> 27."
     return 0
 }
 
@@ -3807,7 +3851,7 @@ feat_pause() { read -r -p "Tekan Enter untuk kembali ke menu Features..." -r _; 
 port_tcp() { local out; out=$(ss -tln 2>/dev/null); grep -q ":$1 " <<< "$out"; }
 port_udp() { local out; out=$(ss -uln 2>/dev/null); grep -q ":$1 " <<< "$out"; }
 svc_active() { local u; for u in "$@"; do systemctl is-active --quiet "$u" 2>/dev/null && return 0; done; return 1; }
-proc_on() { pgrep -qf "$1" 2>/dev/null; }
+proc_on() { pgrep -f "$1" >/dev/null 2>&1; }
 # xray_inbound <protokol> <network>: true bila config Xray punya inbound itu
 xray_inbound() {
     [[ -f "$XRAY_CONFIG" ]] || return 1
@@ -3827,7 +3871,7 @@ chk_ovpn_udp() { port_udp 1194; }
 chk_ovpn_tcp() { port_tcp 1194; }
 chk_ohp_ssh() { proc_on 'ohp.*ssh' || port_tcp 8181; }
 chk_ohp_dropbear() { proc_on 'ohp.*dropbear' || port_tcp 8282; }
-chk_ohp_ovpn() { proc_on 'ohp.*openvpn'; }
+chk_ohp_ovpn() { svc_active ohp-openvpn || port_tcp 8383; }
 chk_wsepro() { svc_active ws-epro && port_tcp 10090; }
 chk_badvpn7100() { port_udp 7100; }
 chk_badvpn7200() { port_udp 7200; }
@@ -4818,9 +4862,9 @@ feat_booster_cpu() {
 # Perbaiki SEMUA layanan yang OFF di Running Service (dipanggil dari
 # Running Service bila user jawab y, atau langsung dari Features 27).
 # Setiap kelompok hanya diperbaiki bila ada entrinya yang OFF; yang sudah ON
-# dilewati. OHP OpenVPN TIDAK dipasang di sini — butuh server OpenVPN yang
-# sudah jalan (kini dipasang oleh setup_openvpn bila OFF, lihat di bawah);
-# OHP-nya sendiri tetap opsional dan dilaporkan jujur bila belum ada.
+# dilewati. OHP OpenVPN dipasang oleh setup_ohp bila server OpenVPN
+# sudah ada (lihat blok OHP di bawah); bila server OpenVPN belum ada,
+# OHP OpenVPN dilewati dengan pesan jujur.
 feat_fix_all_services() {
     echo "=== Fixx Semua Service OFF ==="
     echo "Memeriksa 29 layanan, memperbaiki yang OFF (yang sudah ON dilewati)."
@@ -4870,12 +4914,9 @@ feat_fix_all_services() {
         info "[OpenVPN WS-SSL/SSL/UDP] ada yang OFF — install server OpenVPN + jembatan WS..."
         setup_openvpn || warn "[OpenVPN] install gagal (lihat pesan di atas)."
     fi
-    if ! chk_ohp_ssh || ! chk_ohp_dropbear; then
-        info "[OHP SSH / Dropbear] ada yang OFF — setup OHP (SSH 8181 + Dropbear 8282)..."
+    if ! chk_ohp_ssh || ! chk_ohp_dropbear || ! chk_ohp_ovpn; then
+        info "[OHP] ada yang OFF — setup OHP (SSH 8181 + Dropbear 8282 + OpenVPN 8383)..."
         setup_ohp || warn "[OHP] setup gagal (lihat pesan di atas)."
-    fi
-    if ! chk_ohp_ovpn; then
-        warn "[OHP OpenVPN] tetap OFF — OHP untuk OpenVPN belum dipasang (server OpenVPN sendiri sudah bisa dipasang via menu 12 -> 28)."
     fi
     echo
     echo "=== Hasil sesudah perbaikan ==="

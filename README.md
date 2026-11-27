@@ -299,18 +299,16 @@ OTHER
                                 sekaligus, kelompok per kelompok: SSH UDP-HC
                                 + BadVPN (forwarder UDP 7100/7200/7300 ->
                                 SSH 22, dibuat sendiri di script ini),
-                                OHP (HTTP tunnel SSH 8181 -> SSH 22 dan
-                                Dropbear 8282 -> Dropbear 109, dibuat
-                                sendiri), WS ePRO, Dropbear (109/143),
+                                OHP (HTTP tunnel SSH 8181 -> SSH 22,
+                                Dropbear 8282 -> Dropbear 109, dan OpenVPN
+                                8383 -> OpenVPN SSL 1195, dibuat sendiri),
+                                WS ePRO, Dropbear (109/143),
                                 Haproxy (multiport), Crons, Nginx, Xray
                                 (bangun ulang config termasuk inbound gRPC +
                                 Shadowsocks baru, lalu restart), OpenVPN
                                 WS-SSL + SSL + UDP (install server +
                                 jembatan WS bila OFF, lihat item 28).
                                 Yang sudah ON dilewati.
-                                OHP OpenVPN tetap OFF (belum dipasang,
-                                opsional — butuh server OpenVPN yang kini
-                                sudah ada).
  28.) Install OpenVPN WS-SSL   (install server OpenVPN + PKI openssl +
                                 jembatan WebSocket ws-ovpn 127.0.0.1:10091
                                 + Nginx location /ovpn (80 + 443) + NAT;
@@ -321,7 +319,8 @@ OTHER
                                 service "OpenVPN UDP"; TCP dan UDP 1194
                                 tidak bentrok). Lalu buat akun klien contoh
                                 "ovpn" 30 hari. Service "OpenVPN WS-SSL",
-                                "OpenVPN SSL", dan "OpenVPN UDP" di
+                                "OpenVPN SSL", "OpenVPN UDP", dan "OHP
+                                OpenVPN" (8383 -> OpenVPN SSL 1195) di
                                 Running Service jadi ON. Buat akun lain:
                                 `vps-manager --create ovpn --name <nama>
                                 --days 30` — file .ovpn di
@@ -534,7 +533,8 @@ vps-manager --check   # cek rantai Nginx -> Xray -> path WS (80 & 443)
 #   10006 Trojan gRPC (trojan-grpc) | 10007 Shadowsocks WS /ss
 #   10008 Shadowsocks gRPC (ss-grpc) | 10085 Stats API
 #   10090 ws-epro (SSH WS /ssh-ws) | 8181 OHP SSH -> SSH 22
-#   8282 OHP Dropbear -> Dropbear 109 | UDP 7100/7200/7300 -> SSH 22
+#   8282 OHP Dropbear -> Dropbear 109 | 8383 OHP OpenVPN -> OpenVPN SSL 1195
+#   UDP 7100/7200/7300 -> SSH 22
 # Shadowsocks: menu 13 atau --create ss; link TLS (443) + Non-TLS (80) +
 # gRPC (443), plugin v2ray-plugin, method aes-256-gcm. Bot Telegram juga
 # punya tombol Shadowsocks (install ulang bot via menu 11 > 01 dulu).
@@ -559,7 +559,7 @@ journalctl -u xray -n 50 --no-pager
 | Lupa password SSH akun | Password SSH tidak disimpan di server (sengaja). Reset manual: `passwd <nama-user>` sebagai root, lalu perpanjang bila perlu. |
 | Domain belum resolve | `curl https://api.ipify.org` untuk IP VPS, lalu samakan A record domain dengan IP itu. Installer memberi peringatan bila tidak cocok. |
 | SSH terkunci | Script tidak pernah mengubah port 22 dan UFW selalu allow 22 dulu sebelum enable. Bila tetap terkunci, akses via console provider VPS. |
-| Running Service banyak OFF padahal layanan jalan | Dua penyebab: (1) layanan memang belum terpasang — perbaiki via menu 12 → 27 (Fixx Semua Service OFF); (2) bug cek port di versi lama: `ss \| grep -q` di bawah `set -o pipefail` bisa mati kena SIGPIPE (grep keluar duluan, ss exit 141) sehingga port yang LISTEN dilaporkan OFF secara acak. Sejak 27 Nov 2026, semua cek menangkap output `ss` dulu baru grep — hasil Running Service kini stabil. Bila masih ada yang OFF, itu memang belum terpasang (OHP OpenVPN belum dipasang — opsional; OpenVPN WS-SSL kini dipasang via menu 12 → 28 atau 12 → 27; OHP dan UDP-HC/BadVPN sudah dipasang sejak 27 Nov 2026 — OHP SSH 8181, OHP Dropbear 8282, UDP 7100/7200/7300 — dan diperbaiki via menu 12 → 27). |
+| Running Service banyak OFF padahal layanan jalan | Dua penyebab: (1) layanan memang belum terpasang — perbaiki via menu 12 → 27 (Fixx Semua Service OFF); (2) bug cek port di versi lama: `ss \| grep -q` di bawah `set -o pipefail` bisa mati kena SIGPIPE (grep keluar duluan, ss exit 141) sehingga port yang LISTEN dilaporkan OFF secara acak. Sejak 27 Nov 2026, semua cek menangkap output `ss` dulu baru grep — hasil Running Service kini stabil. Bila masih ada yang OFF, itu memang belum terpasang (OHP dan UDP-HC/BadVPN sudah dipasang sejak 27 Nov 2026 — OHP SSH 8181, OHP Dropbear 8282, OHP OpenVPN 8383, UDP 7100/7200/7300 — dan diperbaiki via menu 12 → 27). |
 
 ## Uninstall bersih
 
