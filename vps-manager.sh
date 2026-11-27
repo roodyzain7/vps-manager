@@ -2293,8 +2293,11 @@ create_ssh() {
     printf '%s:%s\n' "$name" "$password" | chpasswd
     chage -E "$expiry" "$name"
     local acc
+    # Password SSH disimpan di state.json (mode 600, root saja) supaya
+    # menu 9 / show_link bisa menampilkan host:port@nama:password.
     acc=$(jq -n --arg name "$name" --arg exp "$expiry" --arg now "$(today_iso)" \
-        '{protocol:"ssh", name:$name, uuid:"", password:"", expiry:$exp,
+        --arg pass "$password" \
+        '{protocol:"ssh", name:$name, uuid:"", password:$pass, expiry:$exp,
           limit_ip:null, flow:"", transport:"", status:"active", created_at:$now}')
     state_add_account "$acc" || { userdel -r "$name" 2>/dev/null || true; error "Gagal menyimpan state — user Linux dihapus kembali."; return 1; }
     local mode domain addr geo city isp
@@ -2798,8 +2801,9 @@ show_link() {
     local link="" link_nontls="" link_grpc=""
     case "$proto" in
         ssh)
-            local exp geo city isp exp_disp
+            local exp geo city isp exp_disp pass
             exp=$(jq -r --arg n "$name" '.accounts[] | select(.protocol=="ssh" and .name==$n) | .expiry' "$STATE_FILE")
+            pass=$(jq -r --arg n "$name" '.accounts[] | select(.protocol=="ssh" and .name==$n) | .password // ""' "$STATE_FILE")
             exp_disp=$(trial_expiry_display "ssh" "$name" "$exp")
             geo=$(server_geo); city="${geo%%|*}"; isp="${geo##*|}"
             echo "SSH - CEK AKUN"
@@ -2811,8 +2815,15 @@ show_link() {
             echo "Expired On : ${exp_disp}"
             echo "----------------------------------------"
             echo "CONFIG HTTP CUSTOM"
-            echo "SSH WEBSOCKET : ${addr}:80@${name}"
-            echo "SSH SSL       : ${addr}:443@${name}"
+            if [[ -n "$pass" ]]; then
+                echo "SSH WEBSOCKET : ${addr}:80@${name}:${pass}"
+                echo "SSH SSL       : ${addr}:443@${name}:${pass}"
+            else
+                # Akun SSH lama (dibuat sebelum password disimpan): password
+                # tidak tersimpan, tampilkan tanpa password.
+                echo "SSH WEBSOCKET : ${addr}:80@${name}"
+                echo "SSH SSL       : ${addr}:443@${name}"
+            fi
             echo "----------------------------------------"
             return 0
             ;;

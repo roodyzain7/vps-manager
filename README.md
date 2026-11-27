@@ -220,9 +220,11 @@ SSH SSL       : sg1.roodyzain.web.id:443@saya:saya
 
 Format setting-nya `host:port@name:password`, **tanpa path**. Di HTTP
 Custom: **SSH WEBSOCKET pakai port 80** (non-TLS), **SSH SSL pakai
-port 443** (TLS/SNI). Saat buat akun, password asli tampil di setting
-itu; saat lihat akun (menu 9), password tidak tersimpan di server,
-jadi setting-nya tampil sebagai `host:port@name` saja. Jalurnya sudah
+port 443** (TLS/SNI). Saat buat akun maupun lihat akun (menu 9),
+password tampil di setting itu sebagai `host:port@name:password`
+(password SSH disimpan di `/etc/vps-manager/state.json`, mode 600,
+hanya root yang bisa baca). Akun SSH lama (dibuat sebelum password
+disimpan) tetap tampil sebagai `host:port@name` saja. Jalurnya sudah
 disiapkan script: Nginx meneruskan handshake WebSocket di root `/`
 (tanpa path) **dan** di `/ssh-ws` — di port 80 maupun 443 — ke
 jembatan ws-epro (`127.0.0.1:10090`) → SSH port 22. HTTP biasa di
