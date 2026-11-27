@@ -81,12 +81,18 @@ log() {
     local msg="$*"
     local ts
     ts=$(TZ=Asia/Jakarta date '+%Y-%m-%d %H:%M:%S %Z')
-    printf '%s [%s] %s\n' "$ts" "$level" "$msg" | tee -a "$LOG_FILE"
+    # Tulis ke file log SAJA (bukan ke terminal): sebelumnya pakai tee
+    # sehingga baris log ber-timestamp ikut muncul di terminal/bot dan
+    # menduplikasi baris [OK] yang sama persis.
+    printf '%s [%s] %s\n' "$ts" "$level" "$msg" >> "$LOG_FILE" 2>/dev/null || true
 }
 
-info()  { log "INFO" "$@" >&2; printf '%b\n' "${C_GREEN}[OK]${C_RESET} $*"; }
-warn()  { log "WARN" "$@" >&2; printf '%b\n' "${C_YELLOW}[!]${C_RESET} $*"; }
-error() { log "ERROR" "$@" >&2; printf '%b\n' "${C_RED}[X]${C_RESET} $*" >&2; }
+# QUIET=1: info() tetap mencatat ke file log, tapi tidak mencetak [OK] ke
+# terminal. Dipakai saat buat/lihat akun supaya hasilnya hanya blok CEK AKUN.
+QUIET=0
+info()  { log "INFO" "$@"; [[ "${QUIET:-0}" == "1" ]] || printf '%b\n' "${C_GREEN}[OK]${C_RESET} $*"; }
+warn()  { log "WARN" "$@"; printf '%b\n' "${C_YELLOW}[!]${C_RESET} $*"; }
+error() { log "ERROR" "$@"; printf '%b\n' "${C_RED}[X]${C_RESET} $*" >&2; }
 
 # Trap error: catat baris & perintah yang gagal, lalu keluar dengan pesan jelas.
 trap 'error "Script gagal di baris ${LINENO} (perintah: ${BASH_COMMAND}). Lihat ${LOG_FILE}."' ERR
@@ -1715,6 +1721,7 @@ ask_name() { # $1=protokol — nama akun unik per protokol
 # -----------------------------------------------------------------------------
 create_ssh() {
     # $1=name (opsional) $2=days (opsional) $3=password (opsional)
+    local QUIET=1
     local name="${1:-}" days="${2:-}" password="${3:-}"
     [[ -z "$name" ]] && name=$(ask_name "ssh")
     if ! valid_username "$name"; then error "Nama SSH tidak valid: $name"; return 1; fi
@@ -1744,16 +1751,35 @@ create_ssh() {
         '{protocol:"ssh", name:$name, uuid:"", password:"", expiry:$exp,
           limit_ip:null, flow:"", transport:"", status:"active", created_at:$now}')
     state_add_account "$acc" || { userdel -r "$name" 2>/dev/null || true; error "Gagal menyimpan state — user Linux dihapus kembali."; return 1; }
-    echo
-    info "Akun SSH dibuat: ${name} (expired: ${expiry})"
-    echo "  Username : ${name}"
-    echo "  Password : ${password}   <-- simpan sekarang, password TIDAK disimpan di server"
-    echo "  Expired  : ${expiry}"
-    echo "  Login    : ssh ${name}@<IP-VPS>  (port 22)"
+    local mode domain addr geo city isp
+    mode=$(state_get '.install.mode // ""')
+    domain=$(state_get '.install.domain // ""')
+    addr="$domain"
+    if [[ "$mode" == "reality" ]]; then
+        addr=$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+    fi
+    geo=$(server_geo); city="${geo%%|*}"; isp="${geo##*|}"
+    echo "SSH - CEK AKUN"
+    echo "----------------------------------------"
+    echo "Remarks    : ${name}"
+    echo "Domain     : ${addr}"
+    echo "ISP        : ${isp}"
+    echo "City       : ${city}"
+    echo "Expired On : ${expiry}"
+    echo "----------------------------------------"
+    echo "CONFIG DETAILS"
+    echo "Host       : ${addr}"
+    echo "Port       : 22"
+    echo "Username   : ${name}"
+    echo "Password   : ${password}   <-- simpan sekarang, password TIDAK disimpan di server"
+    echo "SSH WS     : ${addr}:80 dan ${addr}:443 (path /ssh-ws, via ws-epro)"
+    echo "Perintah   : ssh ${name}@${addr}"
+    echo "----------------------------------------"
 }
 
 create_vmess() {
     # $1=name $2=days $3=limit_ip(opsional)
+    local QUIET=1
     local name="${1:-}" days="${2:-}" limit_ip="${3:-}"
     [[ -z "$name" ]] && name=$(ask_name "vmess")
     if ! valid_username "$name"; then error "Nama tidak valid: $name"; return 1; fi
@@ -1779,6 +1805,7 @@ create_vmess() {
 
 create_vless() {
     # $1=name $2=days $3=transport(ws|tcp, default ikut mode) $4=limit_ip
+    local QUIET=1
     local name="${1:-}" days="${2:-}" transport="${3:-}" limit_ip="${4:-}"
     local mode
     mode=$(state_get '.install.mode // ""')
@@ -1815,6 +1842,7 @@ create_vless() {
 
 create_trojan() {
     # $1=name $2=days $3=password(opsional)
+    local QUIET=1
     local name="${1:-}" days="${2:-}" password="${3:-}"
     [[ -z "$name" ]] && name=$(ask_name "trojan")
     if ! valid_username "$name"; then error "Nama tidak valid: $name"; return 1; fi
@@ -1841,6 +1869,7 @@ create_trojan() {
 
 create_ss() {
     # $1=name $2=days $3=password(opsional) — Shadowsocks via Xray (WS /ss + gRPC).
+    local QUIET=1
     local name="${1:-}" days="${2:-}" password="${3:-}"
     [[ -z "$name" ]] && name=$(ask_name "ss")
     if ! valid_username "$name"; then error "Nama tidak valid: $name"; return 1; fi
@@ -4471,7 +4500,6 @@ main() {
     # sebelum menu sempat tampil (bug yang dilaporkan user).
     ensure_jq
     state_init
-    check_os
     # Pastikan pintasan `menu` ada (untuk yang install dari versi lama, cukup
     # jalankan `vps-manager` sekali — pintasan langsung dibuat bila belum ada).
     if [[ -x "$INSTALL_BIN" && ! -e /usr/local/bin/menu ]]; then
@@ -4480,6 +4508,7 @@ main() {
 
     # Tanpa argumen -> menu interaktif.
     if (( $# == 0 )); then
+        check_os
         menu_loop
         return 0
     fi
@@ -4517,6 +4546,13 @@ main() {
             *) error "Argumen tidak dikenal: $1 (lihat --help)"; exit 1 ;;
         esac
     done
+
+    # Buat/lihat akun: hasil harus simpel (hanya blok CEK AKUN) — matikan
+    # [OK] sejak awal, termasuk baris "OS terdeteksi" dari check_os.
+    case "$cmd" in
+        create|trial|show) QUIET=1 ;;
+    esac
+    check_os
 
     case "$cmd" in
         install)

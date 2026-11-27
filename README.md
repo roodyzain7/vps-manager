@@ -178,6 +178,13 @@ vmess://...
 ----------------------------------------
 ```
 
+Hasil buat/lihat akun **hanya menampilkan blok CEK AKUN** — tanpa baris
+`[OK]`, tanpa baris log ber-timestamp, tanpa "OS terdeteksi". Semua
+kemajuan proses tetap dicatat ke file log `/var/log/vps-manager.log`
+(saja, tidak ikut tampil di terminal), dan bila ada yang gagal, pesan
+error tetap tampil. Perintah lain (menu, list, check, install) tetap
+menampilkan baris `[OK]` seperti biasa.
+
 Link **WS TLS otomatis disalin ke clipboard** lewat OSC 52 begitu
 ditampilkan — di Termius tinggal paste di v2rayNG / NekoBox / Streisand /
 FoXray, tanpa perlu menandai teks panjangnya. (Bila belum tersalin,
