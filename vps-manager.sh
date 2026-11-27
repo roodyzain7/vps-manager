@@ -1419,14 +1419,27 @@ EOF
 
 
 setup_ws_epro() {
-    if python3 -c "import websockets" 2>/dev/null; then
-        info "Modul websockets sudah ada."
+    # websockets 9.x (yang dipasang apt di Ubuntu 22.04) TIDAK kompatibel
+    # dengan Python 3.10+: asyncio.Lock(loop=) sudah dihapus, jadi server
+    # jalan tapi SETIAP handshake gagal diam-diam (koneksi di-reset,
+    # Nginx: recv() failed 104 -> 502; persis 27 Nov 2026). Butuh >= 10.0.
+    # Jadi: pip (versi terbaru) dulu, apt hanya fallback, lalu verifikasi.
+    local ws_ok=0
+    if python3 -c "import websockets; v=tuple(map(int, websockets.__version__.split('.')[:2])); exit(0 if v>=(10,0) else 1)" 2>/dev/null; then
+        ws_ok=1
+        info "Modul websockets sudah ada (versi >= 10.0)."
     else
-        info "Menginstall modul websockets (untuk jembatan SSH WS)..."
-        if ! (timeout 120 apt-get install -y python3-websockets 2>/dev/null || timeout 120 pip3 install --break-system-packages websockets 2>/dev/null || timeout 120 pip3 install websockets 2>/dev/null); then
-            warn "Gagal install websockets — SSH WS (/ssh-ws) tidak akan jalan; VMess/VLESS/Trojan tetap jalan."
-            return 1
+        info "Menginstall/upgrade modul websockets ke >= 10.0 (untuk jembatan SSH WS)..."
+        if timeout 120 pip3 install --break-system-packages -U websockets 2>/dev/null || timeout 120 pip3 install -U websockets 2>/dev/null; then
+            ws_ok=1
+        elif timeout 120 apt-get install -y python3-websockets 2>/dev/null && python3 -c "import websockets" 2>/dev/null; then
+            ws_ok=1
+            warn "websockets terpasang dari apt (bisa jadi 9.x, tidak kompatibel Python 3.10+) — SSH WS mungkin tetap 502; coba pip manual: pip3 install -U websockets."
         fi
+    fi
+    if [[ "$ws_ok" != "1" ]]; then
+        warn "Gagal install websockets — SSH WS (/ssh-ws) tidak akan jalan; VMess/VLESS/Trojan tetap jalan."
+        return 1
     fi
     mkdir -p /opt/ws-epro
     cat > /opt/ws-epro/ws-epro.py <<'PYEOF'
