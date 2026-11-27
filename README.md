@@ -194,24 +194,36 @@ output ditangkap program lain (mis. bot Telegram), tidak ada escape
 sequence yang ikut terkirim — pesan bot tetap bersih. Untuk akun trial,
 "Expired On" menampilkan tanggal + jam habisnya.
 
-**Akun SSH menampilkan SSH Tunnel WebSocket untuk HTTP Custom.** Di
-bawah CONFIG DETAILS ada bagian `SSH TUNNEL WEBSOCKET (HTTP CUSTOM)`:
+**Akun SSH hanya menampilkan config SSH WebSocket untuk HTTP Custom
+— SSH mentah (port 22) tidak ditampilkan.** Hasil akun SSH (buat +
+lihat) hanya berisi:
 
 ```
-SSH TUNNEL WEBSOCKET (HTTP CUSTOM)
-WS NTLS    : sg1.roodyzain.web.id:80@saya:saya
-WS TLS/SNI : sg1.roodyzain.web.id:443@saya:saya
-Path WS    : /ssh-ws
+SSH - CEK AKUN
+----------------------------------------
+Remarks    : saya
+Domain     : sg1.roodyzain.web.id
+ISP        : ...
+City       : ...
+Expired On : ...
+----------------------------------------
+CONFIG HTTP CUSTOM
+SSH WEBSOCKET : sg1.roodyzain.web.id:80@saya:saya
+SSH SSL       : sg1.roodyzain.web.id:443@saya:saya
+----------------------------------------
 ```
 
-Format setting-nya `host:port@name:password`. Di HTTP Custom:
-**non-TLS pakai port 80**, **TLS/SNI pakai port 443**, path `/ssh-ws`.
-Saat buat akun, password asli tampil di setting itu; saat lihat akun
-(menu 9), password tidak tersimpan di server, jadi setting-nya tampil
-sebagai `host:port@name` saja. Jalurnya sudah disiapkan script: Nginx
-`/ssh-ws` di port 80 dan 443 → jembatan ws-epro (`127.0.0.1:10090`)
-→ SSH port 22. `ssh` standar dari terminal tetap pakai port **22**
-(port 80/443 itu WebSocket, bukan SSH mentah).
+Format setting-nya `host:port@name:password`, **tanpa path**. Di HTTP
+Custom: **SSH WEBSOCKET pakai port 80** (non-TLS), **SSH SSL pakai
+port 443** (TLS/SNI). Saat buat akun, password asli tampil di setting
+itu; saat lihat akun (menu 9), password tidak tersimpan di server,
+jadi setting-nya tampil sebagai `host:port@name` saja. Jalurnya sudah
+disiapkan script: Nginx meneruskan handshake WebSocket di root `/`
+(tanpa path) **dan** di `/ssh-ws` — di port 80 maupun 443 — ke
+jembatan ws-epro (`127.0.0.1:10090`) → SSH port 22. HTTP biasa di
+root tetap seperti semula (301 ke HTTPS di port 80, 200 OK di port
+443). `ssh` standar dari terminal tetap pakai port **22** (port
+80/443 itu WebSocket, bukan SSH mentah).
 
 **Bot Telegram menampilkan format yang sama.** Karena bot menjalankan
 CLI yang sama, hasil buat akun / link akun di bot juga format CEK AKUN.

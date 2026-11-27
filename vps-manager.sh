@@ -847,7 +847,23 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
     }
-    location / { return 301 https://\$host\$request_uri; }
+    # SSH WS tanpa path (HTTP Custom tanpa path): handshake WebSocket di
+    # root "/" diteruskan ke ws-epro; bukan WebSocket -> tetap redirect HTTPS.
+    # "rewrite ... last" di dalam "if" adalah pola aman menurut dokumentasi Nginx.
+    location / {
+        if (\$http_upgrade ~* "websocket") {
+            rewrite ^ /__ssh_ws_root last;
+        }
+        return 301 https://\$host\$request_uri;
+    }
+    location /__ssh_ws_root {
+        internal;
+        proxy_pass http://127.0.0.1:10090;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+    }
 }
 
 server {
@@ -932,9 +948,22 @@ server {
         default_type text/plain;
     }
 
+    # SSH WS tanpa path (HTTP Custom tanpa path): handshake WebSocket di
+    # root "/" diteruskan ke ws-epro; bukan WebSocket -> tetap 200 OK.
     location / {
+        if (\$http_upgrade ~* "websocket") {
+            rewrite ^ /__ssh_ws_root last;
+        }
         return 200 'vps-manager OK\n';
         add_header Content-Type text/plain;
+    }
+    location /__ssh_ws_root {
+        internal;
+        proxy_pass http://127.0.0.1:10090;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
     }
 }
 EOF
@@ -1785,17 +1814,9 @@ create_ssh() {
     echo "City       : ${city}"
     echo "Expired On : ${expiry}"
     echo "----------------------------------------"
-    echo "CONFIG DETAILS"
-    echo "Host       : ${addr}"
-    echo "Port       : 22"
-    echo "Username   : ${name}"
-    echo "Password   : ${password}   <-- simpan sekarang, password TIDAK disimpan di server"
-    echo "Perintah   : ssh ${name}@${addr}"
-    echo "----------------------------------------"
-    echo "SSH TUNNEL WEBSOCKET (HTTP CUSTOM)"
-    echo "WS NTLS    : ${addr}:80@${name}:${password}"
-    echo "WS TLS/SNI : ${addr}:443@${name}:${password}"
-    echo "Path WS    : /ssh-ws"
+    echo "CONFIG HTTP CUSTOM"
+    echo "SSH WEBSOCKET : ${addr}:80@${name}:${password}"
+    echo "SSH SSL       : ${addr}:443@${name}:${password}"
     echo "----------------------------------------"
 }
 
@@ -2284,17 +2305,9 @@ show_link() {
             echo "City       : ${city}"
             echo "Expired On : ${exp_disp}"
             echo "----------------------------------------"
-            echo "CONFIG DETAILS"
-            echo "Host       : ${addr}"
-            echo "Port       : 22"
-            echo "Username   : ${name}"
-            echo "Password   : (sudah ditampilkan sekali saat dibuat — bila lupa, reset manual: passwd ${name})"
-            echo "Perintah   : ssh ${name}@${addr}"
-            echo "----------------------------------------"
-            echo "SSH TUNNEL WEBSOCKET (HTTP CUSTOM)"
-            echo "WS NTLS    : ${addr}:80@${name}"
-            echo "WS TLS/SNI : ${addr}:443@${name}"
-            echo "Path WS    : /ssh-ws"
+            echo "CONFIG HTTP CUSTOM"
+            echo "SSH WEBSOCKET : ${addr}:80@${name}"
+            echo "SSH SSL       : ${addr}:443@${name}"
             echo "----------------------------------------"
             return 0
             ;;
