@@ -2642,7 +2642,7 @@ chk_badvpn7100() { port_udp 7100; }
 chk_badvpn7200() { port_udp 7200; }
 chk_badvpn7300() { port_udp 7300; }
 chk_dropbear() { svc_active dropbear && { port_tcp 109 || port_tcp 143; }; }
-chk_haproxy() { svc_active haproxy && port_tcp 8880; }
+chk_haproxy() { port_tcp 8880; }
 chk_crons() { svc_active cron crond; }
 chk_nginx() { svc_active nginx && port_tcp 443; }
 chk_xray_vmess_tls() { svc_active xray && xray_inbound vmess ws && port_tcp 443; }
@@ -2965,6 +2965,28 @@ backend xray-tls
 HAPROXYEOF
 }
 
+haproxy_is_up() {
+    # HAProxy dianggap jalan bila port 8880 LISTEN (bukti ia melayani).
+    # systemctl is-active kadang masih "activating" sesaat sesudah restart
+    # (unit Type=notify), dan worker butuh sejenak untuk bind ~790 port —
+    # jadi cek port diulang 3x (jeda 2 detik), bukan sekali. Port yang jadi
+    # patokan; status unit semata tidak cukup untuk menyatakan OFF.
+    local i
+    for i in 1 2 3; do
+        port_tcp 8880 && return 0
+        sleep 2
+    done
+    return 1
+}
+
+haproxy_status_diag() {
+    # Tampilkan separuh mana yang gagal, agar screenshot berikutnya langsung
+    # menjawabnya (tanpa perlu perintah manual dari user).
+    local st
+    st=$(systemctl is-active haproxy 2>/dev/null || echo "?")
+    info "Status unit haproxy: ${st} | Port 8880: $(port_tcp 8880 && echo LISTEN || echo TIDAK-LISTEN) | Port 9444: $(port_tcp 9444 && echo LISTEN || echo TIDAK-LISTEN)"
+}
+
 haproxy_apply_limits() {
     # Naikkan batas file descriptor service HAProxy via drop-in systemd, agar
     # maxconn + ~790 listener tidak mentok di batas default. Aman bila systemd
@@ -2985,7 +3007,7 @@ haproxy_fix_bind() {
     # 443 berarti confignya yang salah (update script lalu ulangi Fixx Haproxy).
     local attempt jlog port holder
     for attempt in 1 2 3; do
-        if systemctl is-active --quiet haproxy 2>/dev/null && port_tcp 8880; then
+        if haproxy_is_up; then
             info "HAProxy jalan."
             return 0
         fi
@@ -3023,10 +3045,11 @@ haproxy_fix_bind() {
         systemctl restart haproxy 2>/dev/null || true
         sleep 2
     done
-    if systemctl is-active --quiet haproxy 2>/dev/null && port_tcp 8880; then
+    if haproxy_is_up; then
         info "HAProxy jalan."
         return 0
     fi
+    haproxy_status_diag
     error "HAProxy masih gagal jalan sesudah 3 percobaan. Cek: journalctl -u haproxy -n 30"
     return 1
 }
@@ -3062,9 +3085,10 @@ setup_haproxy() {
     systemctl enable haproxy 2>/dev/null || true
     systemctl restart haproxy
     sleep 2
-    if systemctl is-active --quiet haproxy && port_tcp 8880; then
+    if haproxy_is_up; then
         info "HAProxy jalan (multiport: 55, 8080, 8880, 2082, 2086, 2095, 222-442 + 444-1000 HTTP + 9444 TLS)."
     else
+        haproxy_status_diag
         haproxy_fix_bind
         return $?
     fi
@@ -3086,12 +3110,13 @@ feat_fix_haproxy() {
     haproxy_apply_limits
     systemctl restart haproxy
     sleep 2
-    if systemctl is-active --quiet haproxy && port_tcp 8880; then
+    if haproxy_is_up; then
         info "HAProxy jalan."
         echo "--- Backend (harus UP bila Xray/ws-epro/Nginx jalan) ---"
         echo "  55, 8080, 8880, 2082, 2086, 2095, 222-442 + 444-1000 -> VMess 10001 / VLESS 10002 / Trojan 10003 / SSH-WS 10090"
         echo "  9444 -> Nginx :443 (TLS)"
     else
+        haproxy_status_diag
         haproxy_fix_bind
         return $?
     fi
