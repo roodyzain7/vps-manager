@@ -222,6 +222,7 @@ bash vps-manager.sh --create ss     --name user1 --days 30 --password Rahasia123
 # Lihat / hapus / perpanjang / tampilkan link
 bash vps-manager.sh --list
 bash vps-manager.sh --delete --protocol vmess --name user1 [--yes]
+# Menu 7 (interaktif): tampilkan daftar akun bernomor — tinggal tekan nomornya, lalu ketik YA. Akun diurutkan berdasarkan tanggal expired (paling cepat habis di atas).
 bash vps-manager.sh --renew  --protocol vless --name user1 --days 30
 bash vps-manager.sh --show   --protocol trojan --name user1
 bash vps-manager.sh --check-expired

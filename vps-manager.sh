@@ -1576,14 +1576,63 @@ list_accounts() {
     echo "Akun hampir expired (<=3 hari): ${expiring}"
 }
 
+select_account() {
+    # Pilih akun dari daftar bernomor. Daftar dicetak ke STDERR, hasilnya
+    # ("proto<TAB>name") ke STDOUT, agar pemanggil bisa menangkap hasilnya
+    # via $(...) tanpa ikut menangkap daftarnya. Return 1 bila tidak ada
+    # akun / batal (0) / nomor tidak valid.
+    check_expired_quiet
+    local total
+    total=$(jq -r '.accounts | length' "$STATE_FILE" 2>/dev/null || echo 0)
+    total=${total:-0}
+    if [[ "$total" -eq 0 ]]; then
+        info "Belum ada akun."
+        return 1
+    fi
+    local -a protos names exps stats
+    mapfile -t protos < <(jq -r '.accounts | sort_by(.expiry)[].protocol' "$STATE_FILE")
+    mapfile -t names  < <(jq -r '.accounts | sort_by(.expiry)[].name' "$STATE_FILE")
+    mapfile -t exps   < <(jq -r '.accounts | sort_by(.expiry)[].expiry' "$STATE_FILE")
+    mapfile -t stats  < <(jq -r '.accounts | sort_by(.expiry)[].status' "$STATE_FILE")
+    echo "================= PILIH AKUN (${total}) =================" >&2
+    local i mark
+    for i in "${!names[@]}"; do
+        mark=""
+        if is_expired "${exps[$i]}" && [[ "${stats[$i]}" == "active" ]]; then mark=" (LEWAT!)"; fi
+        printf '%2d) %-8s %-18s %-12s %-10s%s\n' "$((i+1))" "${protos[$i]}" "${names[$i]}" "${exps[$i]}" "${stats[$i]}" "$mark" >&2
+    done
+    echo "----------------------------------------------------------" >&2
+    local pilih
+    read -r -p "Pilih nomor akun [1-${total}, 0 batal]: " pilih || return 1
+    if [[ "$pilih" == "0" || -z "$pilih" ]]; then
+        info "Dibatalkan."
+        return 1
+    fi
+    if ! [[ "$pilih" =~ ^[0-9]+$ ]] || (( pilih < 1 || pilih > total )); then
+        error "Nomor tidak valid: $pilih"
+        return 1
+    fi
+    local idx=$((pilih-1))
+    printf '%s\t%s\n' "${protos[$idx]}" "${names[$idx]}"
+    return 0
+}
+
 delete_account() {
     # $1=protocol $2=name
+    # Bila dipanggil dari menu (tanpa argumen): tampilkan daftar akun
+    # bernomor, user tinggal tekan nomornya — tidak perlu ketik protokol +
+    # nama manual. Jalur CLI (--delete --protocol X --name Y, dipakai bot)
+    # tidak berubah.
     local proto="${1:-}" name="${2:-}"
-    if [[ -z "$proto" ]]; then
-        read -r -p "Protokol (ssh/vmess/vless/trojan/ss): " proto
-    fi
-    if [[ -z "$name" ]]; then
-        read -r -p "Nama akun: " name
+    if [[ -z "$proto" || -z "$name" ]]; then
+        if [[ ! -t 0 ]]; then
+            error "Hapus akun butuh --protocol dan --name bila dijalankan non-interaktif."
+            return 1
+        fi
+        local chosen
+        chosen=$(select_account) || return 0
+        proto=$(printf '%s' "$chosen" | cut -f1)
+        name=$(printf '%s' "$chosen" | cut -f2)
     fi
     case "$proto" in ssh|vmess|vless|trojan|ss) ;; *) error "Protokol tidak valid: $proto"; return 1 ;; esac
     if ! state_account_exists "$proto" "$name"; then
