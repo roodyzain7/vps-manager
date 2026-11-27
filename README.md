@@ -348,7 +348,8 @@ OTHER
                                 menampilkan versi aktif, misal
                                 "Dropbear 2019.78".)
  30.) Install SlowDNS     (DNS Tunnel dnstt: dnstt-server di UDP
-                                <IP_VPS>:53 (domain slow.<domain>) ->
+                                53, bind IP lokal/0.0.0.0 (domain
+                                slow.<domain>) ->
                                 sslh 127.0.0.1:2222 -> SSH 22 atau Xray
                                 VLESS TCP 127.0.0.1:10086. Build dari
                                 source resmi bamsoftware.com (Go).

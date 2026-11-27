@@ -92,7 +92,7 @@ readonly DROPBEAR_VER_NEW="2026.94"
 readonly DROPBEAR_URL_NEW="https://matt.ucc.asn.au/dropbear/releases/dropbear-2026.94.tar.bz2"
 readonly DROPBEAR_BIN_DIR="/usr/local/sbin"
 # SlowDNS (DNS Tunnel, dnstt) — implementasi sendiri dari source resmi.
-# dnstt-server di UDP <IP_VPS>:53 -> sslh 127.0.0.1:2222 -> SSH 22 /
+# dnstt-server di UDP 53 (bind IP lokal / 0.0.0.0) -> sslh 127.0.0.1:2222 -> SSH 22 /
 # Xray VLESS TCP 127.0.0.1:10086. Domain tunnel: slow.<domain>.
 readonly SLOWDNS_DIR="/etc/dnstt"
 readonly SLOWDNS_BIN="/usr/local/bin/dnstt-server"
@@ -1169,16 +1169,23 @@ setup_slowdns() {
     vps_ip=$(state_get '.install.ip // ""' 2>/dev/null)
     [[ -n "$vps_ip" ]] || vps_ip=$(get_public_ip)
     [[ -n "$vps_ip" ]] || { error "IP publik VPS tidak ketahuan — cek internet."; return 1; }
+    # IP publik TIDAK ada di interface lokal (cloud NAT: eth0 pegang IP
+    # privat, mis. 10.3.0.4) — bind ke IP publik gagal "cannot assign
+    # requested address". Bind ke IP lokal (sumber default route) atau
+    # 0.0.0.0 bila deteksi gagal; trafik ke IP publik diteruskan NAT.
+    local bind_ip
+    bind_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')
+    [[ -n "$bind_ip" ]] || bind_ip="0.0.0.0"
     slowdns_build_dnstt || return 1
     slowdns_ensure_keys || return 1
-    # Service dnstt-server: UDP <IP_VPS>:53, forward ke sslh 2222.
+    # Service dnstt-server: UDP <IP lokal>:53, forward ke sslh 2222.
     cat > /etc/systemd/system/dnstt-server.service <<EOF
 [Unit]
 Description=DNSTT SlowDNS server (vps-manager)
 After=network.target
 [Service]
 Type=simple
-ExecStart=$SLOWDNS_BIN -udp $vps_ip:$SLOWDNS_UDP_PORT -privkey-file $SLOWDNS_DIR/server.key $domain 127.0.0.1:$SLOWDNS_MUX_PORT
+ExecStart=$SLOWDNS_BIN -udp $bind_ip:$SLOWDNS_UDP_PORT -privkey-file $SLOWDNS_DIR/server.key $domain 127.0.0.1:$SLOWDNS_MUX_PORT
 Restart=always
 RestartSec=5
 [Install]
@@ -1194,7 +1201,7 @@ EOF
         || { warn "dnstt-server gagal start — cek: systemctl status dnstt-server (port 53 mungkin dipakai layanan lain)."; return 1; }
     sleep 1
     if chk_slowdns; then
-        info "SlowDNS jalan (UDP $vps_ip:$SLOWDNS_UDP_PORT, domain $domain)."
+        info "SlowDNS jalan (UDP $bind_ip:$SLOWDNS_UDP_PORT, domain $domain; IP publik $vps_ip)."
         ufw allow 53/udp 2>/dev/null || true
     else
         warn "SlowDNS belum jalan — cek: systemctl status dnstt-server"
