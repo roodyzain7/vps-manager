@@ -358,7 +358,11 @@ OTHER
                                 IP VPS, NS slow -> ns-slow.<domain>.
                                 Klien: aplikasi SlowDNS / HTTP Custom
                                 mode SlowDNS. Implementasi sendiri —
-                                TIDAK pakai file dari zip SLOWDNSWIBU.)
+                                TIDAK pakai file dari zip SLOWDNSWIBU.
+                                Hasil buat/lihat akun VMess, VLESS dan
+                                Trojan otomatis mencantumkan Nameserver
+                                + Public Key SlowDNS (bila terpasang),
+                                jadi langsung bisa dipakai mode SlowDNS.)
   x . EXIT
 ```
 

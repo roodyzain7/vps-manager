@@ -1236,6 +1236,23 @@ slowdns_info() {
     echo "Catatan: port UDP 53 harus terbuka di firewall VPS."
 }
 
+slowdns_client_block() {
+    # Blok SlowDNS untuk ditempel di hasil CEK AKUN (VMess/VLESS/Trojan):
+    # Nameserver + Public Key, supaya langsung bisa dipakai di klien
+    # SlowDNS tanpa buka menu 12 -> 30 lagi. Diam bila SlowDNS belum
+    # terpasang (tidak ada key/domain) — hasil akun tetap bersih.
+    local domain pubkey
+    domain=$(slowdns_domain)
+    [[ -z "$domain" ]] && return 0
+    [[ -f "$SLOWDNS_DIR/server.pub" ]] || return 0
+    pubkey=$(cat "$SLOWDNS_DIR/server.pub" 2>/dev/null)
+    [[ -z "$pubkey" ]] && return 0
+    echo
+    echo "SLOWDNS (DNS TUNNEL)"
+    echo "Nameserver : $domain"
+    echo "Public Key : $pubkey"
+}
+
 feat_install_slowdns() {
     # Menu install SlowDNS (Features 30).
     setup_slowdns || return 1
@@ -3373,6 +3390,11 @@ show_link() {
         echo
         echo "LINK ${proto_label} GRPC"
         echo "$link_grpc"
+    fi
+    # VMess/VLESS/Trojan: cantumkan Nameserver + Public Key SlowDNS
+    # (bila terpasang) supaya akun langsung bisa dipakai mode SlowDNS.
+    if [[ "$proto" == "vmess" || "$proto" == "vless" || "$proto" == "trojan" ]]; then
+        slowdns_client_block
     fi
     echo "----------------------------------------"
 }
