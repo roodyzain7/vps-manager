@@ -2156,6 +2156,23 @@ check_expired() {
 }
 
 # -----------------------------------------------------------------------------
+# Salin ke clipboard terminal via OSC 52 (Termius mendukung; di iPad perlu
+# diaktifkan dulu: Settings -> Terminal -> Sequences -> OSC 52).
+# -----------------------------------------------------------------------------
+osc52_copy() { # $1=teks — salin ke clipboard terminal via OSC 52.
+    # Hanya bila stdout adalah terminal interaktif: bila output ditangkap
+    # (mis. bot Telegram), JANGAN kirim escape sequence agar teks tidak rusak.
+    # Return 0 bila sequence dikirim, 1 bila tidak.
+    [[ -n "${1:-}" ]] || return 1
+    [[ -t 1 ]] || return 1
+    local b64
+    b64=$(printf '%s' "$1" | base64 -w0 2>/dev/null) || return 1
+    [[ -n "$b64" ]] || return 1
+    printf '\033]52;c;%s\a' "$b64"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Tampilkan link/config
 # -----------------------------------------------------------------------------
 show_link() {
@@ -2213,6 +2230,10 @@ show_link() {
                 vmess_json_nontls=$(jq -n -c --arg ps "${name} (non-TLS 80)" --arg add "$addr" --arg id "$uuid" --arg path "$vmess_path" --arg host "$addr" \
                     '{v:"2", ps:$ps, add:$add, port:"80", id:$id, aid:"0", net:"ws", type:"none", host:$host, path:$path, tls:""}')
                 link_nontls="vmess://$(printf '%s' "$vmess_json_nontls" | base64 -w0)"
+                local vmess_json_grpc
+                vmess_json_grpc=$(jq -n -c --arg ps "${name} (gRPC)" --arg add "$addr" --arg id "$uuid" --arg host "$addr" \
+                    '{v:"2", ps:$ps, add:$add, port:"443", id:$id, aid:"0", net:"grpc", type:"none", host:$host, path:"vmess-grpc", tls:"tls", sni:$host}')
+                link_grpc="vmess://$(printf '%s' "$vmess_json_grpc" | base64 -w0)"
             else
                 local vmess_json
                 vmess_json=$(jq -n -c --arg ps "$name" --arg add "$addr" --arg id "$uuid" --arg path "$vmess_path" \
@@ -2233,6 +2254,7 @@ show_link() {
             else
                 link="vless://${uuid}@${addr}:443?encryption=none&security=tls&type=ws&host=${addr}&path=${vless_path}#${name}"
                 link_nontls="vless://${uuid}@${addr}:80?encryption=none&security=none&type=ws&host=${addr}&path=${vless_path}#${name}-nontls"
+                link_grpc="vless://${uuid}@${addr}:443?encryption=none&security=tls&type=grpc&serviceName=vless-grpc&sni=${addr}#${name}-grpc"
             fi
             ;;
         trojan)
@@ -2242,6 +2264,7 @@ show_link() {
             if [[ "$mode" == "domain" ]]; then
                 link="trojan://${pw}@${addr}:443?security=tls&type=ws&host=${addr}&path=${trojan_path}#${name}"
                 link_nontls="trojan://${pw}@${addr}:80?security=none&type=ws&host=${addr}&path=${trojan_path}#${name}-nontls"
+                link_grpc="trojan://${pw}@${addr}:443?security=tls&type=grpc&serviceName=trojan-grpc&sni=${addr}#${name}-grpc"
             else
                 # Mode reality: Trojan lewat WS 10003 tanpa TLS (port dibuka UFW bila perlu).
                 link="trojan://${pw}@${addr}:10003?security=none&type=ws&path=${trojan_path}#${name}"
@@ -2272,20 +2295,23 @@ show_link() {
     esac
 
     echo "================= LINK ${proto^^}: ${name} ================="
-    echo "-- TLS (port 443) --"
+    echo "[1] TLS (port 443):"
     echo "$link"
+    if osc52_copy "$link"; then
+        echo "(Link [1] sudah disalin ke clipboard — tinggal paste di aplikasi VPN.)"
+    fi
     if [[ -n "$link_nontls" ]]; then
         echo
-        echo "-- Non-TLS (port 80) --"
+        echo "[2] Non-TLS (port 80):"
         echo "$link_nontls"
     fi
     if [[ -n "$link_grpc" ]]; then
         echo
-        echo "-- gRPC (port 443) --"
+        echo "[3] gRPC (port 443):"
         echo "$link_grpc"
     fi
     echo
-    echo "Import link di atas ke v2rayNG / NekoBox / Streisand / FoXray."
+    echo "Import ke v2rayNG / NekoBox / Streisand / FoXray."
 }
 
 # -----------------------------------------------------------------------------

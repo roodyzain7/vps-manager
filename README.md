@@ -141,6 +141,33 @@ untuk SSH user Linux-nya ikut dihapus. Di menu 6 (List) akun trial ditandai
 `(TRIAL, sisa 25 mnt)`. Bila trial diperpanjang di menu 8, ia berubah jadi
 akun biasa (penanda trial hilang).
 
+## Link akun: TLS + Non-TLS + gRPC, salin otomatis
+
+Menu 9 (Link Akun) dan hasil buat akun menampilkan tiga link bernomor
+untuk VMess / VLESS / Trojan / Shadowsocks (mode domain):
+
+```
+================= LINK VMESS: aku =================
+[1] TLS (port 443):
+vmess://...
+
+(Link [1] sudah disalin ke clipboard — tinggal paste di aplikasi VPN.)
+
+[2] Non-TLS (port 80):
+vmess://...
+
+[3] gRPC (port 443):
+vmess://...
+```
+
+Link **[1] TLS otomatis disalin ke clipboard** lewat OSC 52 begitu
+ditampilkan — di Termius tinggal paste di v2rayNG / NekoBox / Streisand /
+FoXray, tanpa perlu menandai teks panjangnya. (Bila belum tersalin,
+aktifkan OSC 52 di Termius: Settings → Terminal → Sequences → OSC 52.)
+Link [2] dan [3] tetap bisa disalin manual dengan tekan lama. Saat output
+ditangkap program lain (mis. bot Telegram), tidak ada escape sequence yang
+ikut terkirim — pesan bot tetap bersih.
+
 ## Features (menu 12)
 
 Submenu perbaikan dan utilitas, seperti menu FEATURES di screenshot
