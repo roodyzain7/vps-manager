@@ -4625,6 +4625,38 @@ do_check() {
             502) error "WS non-TLS ${vp} (port 80) : 502 — HAProxy hidup tapi Xray tidak menjawab"; ok=0 ;;
             *)   error "WS non-TLS ${vp} (port 80) : ${code} — cek HAProxy port 80"; ok=0 ;;
         esac
+        # SSH-WS (HTTP Custom): handshake WebSocket di root "/" (tanpa path)
+        # dan di "/ssh-ws" harus sampai ke ws-epro (101/400). --check lama
+        # tidak pernah menguji ini, jadi SSH-WS bisa mati sementara --check
+        # bilang OK. Uji di 443 (TLS) dan 80 (non-TLS).
+        local sp sc
+        for sp in / /ssh-ws; do
+            sc=$(curl -sk --http1.1 --max-time 5 --resolve "${domain}:443:127.0.0.1" "https://${domain}${sp}" \
+                -H "Connection: Upgrade" -H "Upgrade: websocket" \
+                -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
+                -o /dev/null -w "%{http_code}" 2>/dev/null || true)
+            sc=${sc:-000}
+            # curl mencetak 101 lalu timeout menunggu WS ditutup -> "101000".
+            [[ "$sc" == 101000 ]] && sc=101
+            case "$sc" in
+                101) info "SSH-WS ${sp} (port 443) : 101 (NORMAL — sampai ws-epro)" ;;
+                400) info "SSH-WS ${sp} (port 443) : 400 (NORMAL — sampai ws-epro)" ;;
+                502) error "SSH-WS ${sp} (port 443) : 502 — HAProxy/Nginx hidup tapi ws-epro tidak menjawab (cek: systemctl status ws-epro)"; ok=0 ;;
+                *)   error "SSH-WS ${sp} (port 443) : ${sc} — SSH WebSocket tidak jalan (cek HAProxy -> Nginx -> ws-epro)"; ok=0 ;;
+            esac
+            sc=$(curl -s --max-time 5 --resolve "${domain}:80:127.0.0.1" "http://${domain}${sp}" \
+                -H "Connection: Upgrade" -H "Upgrade: websocket" \
+                -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
+                -o /dev/null -w "%{http_code}" 2>/dev/null || true)
+            sc=${sc:-000}
+            [[ "$sc" == 101000 ]] && sc=101
+            case "$sc" in
+                101) info "SSH-WS ${sp} (port 80) : 101 (NORMAL — sampai ws-epro)" ;;
+                400) info "SSH-WS ${sp} (port 80) : 400 (NORMAL — sampai ws-epro)" ;;
+                502) error "SSH-WS ${sp} (port 80) : 502 — HAProxy/Nginx hidup tapi ws-epro tidak menjawab (cek: systemctl status ws-epro)"; ok=0 ;;
+                *)   error "SSH-WS ${sp} (port 80) : ${sc} — SSH WebSocket tidak jalan (cek HAProxy -> Nginx -> ws-epro)"; ok=0 ;;
+            esac
+        done
     elif [[ "$mode" == "reality" ]]; then
         if port_tcp 443; then
             info "Port 443 (REALITY): LISTEN"
